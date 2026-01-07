@@ -1,5 +1,5 @@
 import sys
-sys.path.append("/code1/dyn/github_repos/OpenGraph")
+sys.path.append("/home/awang/Documents/TRAILbot/OpenGraph")
 import open3d as o3d
 import hydra
 from omegaconf import DictConfig
@@ -108,15 +108,15 @@ def main(cfg : DictConfig):
     
     import os
     loaded_view_params = None
-    if os.path.isfile("/code1/dyn/github_repos/OpenGraph/param.json"):
-        loaded_view_params = o3d.io.read_pinhole_camera_parameters("/code1/dyn/github_repos/OpenGraph/param.json")
+    if os.path.isfile("/home/awang/Documents/TRAILbot/OpenGraph/param.json"):
+        loaded_view_params = o3d.io.read_pinhole_camera_parameters("/home/awang/Documents/TRAILbot/OpenGraph/param.json")
         view_control.convert_from_pinhole_camera_parameters(loaded_view_params)
     
     vis.add_geometry(our_pcd.voxel_down_sample(1))
     
-    if os.path.isfile("/code1/dyn/github_repos/OpenGraph/param.json"):
+    if os.path.isfile("/home/awang/Documents/TRAILbot/OpenGraph/param.json"):
         print("view_control ing")
-        loaded_view_params = o3d.io.read_pinhole_camera_parameters("/code1/dyn/github_repos/OpenGraph/param.json")
+        loaded_view_params = o3d.io.read_pinhole_camera_parameters("/home/awang/Documents/TRAILbot/OpenGraph/param.json")
         view_control.convert_from_pinhole_camera_parameters(loaded_view_params)
         print("view_control ed")
     
@@ -201,12 +201,12 @@ def main(cfg : DictConfig):
 
     def save_view_params(vis):
         loaded_view_params = vis.get_view_control().convert_to_pinhole_camera_parameters()
-        o3d.io.write_pinhole_camera_parameters("/code1/dyn/github_repos/OpenGraph/param.json", loaded_view_params)
+        o3d.io.write_pinhole_camera_parameters("/home/awang/Documents/TRAILbot/OpenGraph/param.json", loaded_view_params)
 
     def restore_viewpoint(vis):
-        if os.path.isfile("/code1/dyn/github_repos/OpenGraph/param.json"):
+        if os.path.isfile("/home/awang/Documents/TRAILbot/OpenGraph/param.json"):
             print("view_control ing")
-            loaded_view_params = o3d.io.read_pinhole_camera_parameters("/code1/dyn/github_repos/OpenGraph/param.json")
+            loaded_view_params = o3d.io.read_pinhole_camera_parameters("/home/awang/Documents/TRAILbot/OpenGraph/param.json")
             view_control.convert_from_pinhole_camera_parameters(loaded_view_params)
             print("view_control ed")
             

@@ -3,7 +3,7 @@
 执行定量分析，语义分割，得到我们的点云
 """
 import sys
-sys.path.append("/code1/dyn/github_repos/OpenGraph")
+sys.path.append("/home/awang/Documents/TRAILbot/OpenGraph")
 import copy
 import json
 import os

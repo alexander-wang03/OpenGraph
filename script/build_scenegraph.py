@@ -1,5 +1,5 @@
 import sys
-sys.path.append("/code1/dyn/github_repos/OpenGraph")
+sys.path.append("/home/awang/Documents/TRAILbot/OpenGraphs")
 import pickle
 import gzip
 from pathlib import Path

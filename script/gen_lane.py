@@ -4,7 +4,7 @@
 """
 import sys
 import numpy as np
-sys.path.append("/code1/dyn/github_repos/OpenGraph")
+sys.path.append("/home/awang/Documents/TRAILbot/OpenGraph")
 import matplotlib.pyplot as plt
 import json
 from pathlib import Path

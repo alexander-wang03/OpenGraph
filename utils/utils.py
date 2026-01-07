@@ -3,7 +3,7 @@
 工具函数文件
 """
 import sys
-sys.path.append("/code1/dyn/github_repos/OpenGraph")
+sys.path.append("/home/awang/Documents/TRAILbot/OpenGraph")
 import numpy as np
 import cv2
 import matplotlib.pyplot as plt
@@ -11,9 +11,8 @@ import torch
 from pathlib import Path
 from typing import List, Dict, Optional, Any
 from tokenize_anything import model_registry
-sys.path.append("/home/dyn/multimodal/Grounded-Segment-Anything")
-sys.path.append("/home/dyn/multimodal/Grounded-Segment-Anything/Tag2Text")
-sys.path.append("/code1/dyn/github_repos/OpenGraph")
+sys.path.append("/home/awang/Documents/TRAILbot/third_parties/recognize-anything")
+sys.path.append("/home/awang/Documents/TRAILbot/OpenGraph")
 from some_class.amg_class import MyAutomaticMaskGenerator
 from some_class.map_calss import DetectionList
 import open3d as o3d
@@ -30,7 +29,7 @@ import openai
 from tqdm import trange
 
 try:
-    from Tag2Text.models import tag2text
+    from ram.models import tag2text
     import torchvision.transforms as TS
 except ImportError as e:
     print("Tag2text sub-package not found. Please check your PATH. ")
@@ -727,6 +726,8 @@ def class_objects(cfg, sbert_model, objects: MapObjectList, bg_objects: MapObjec
                 if match:
                     extracted_content = match.group(1)
             # 如果llama生成的特征没有在给定列表中，则使用sbert特征配准
+            if isinstance(extracted_content, list):
+                extracted_content = extracted_content[0] if extracted_content else "unknown"
             if extracted_content not in class_colors_sk_disk:
                 extracted_content_ft = sbert_model.encode(extracted_content, convert_to_tensor=True)
                 extracted_content_ft = extracted_content_ft / extracted_content_ft.norm(dim=-1, keepdim=True)

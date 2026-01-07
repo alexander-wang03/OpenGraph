@@ -3,7 +3,7 @@
 将得到的地图可视化并实现查询等
 """
 import sys
-sys.path.append("/code1/dyn/github_repos/OpenGraph")
+sys.path.append("/home/awang/Documents/TRAILbot/OpenGraph")
 import copy
 import networkx as nx
 from scipy.spatial import KDTree
@@ -450,7 +450,7 @@ def main(cfg : DictConfig):
         '''
         # 输入图像
         image_query = input("Enter the picture name: ")
-        image_base_path = '/code1/dyn/github_repos/OpenGraph/image_query/'
+        image_base_path = '/home/awang/Documents/TRAILbot/OpenGraph/image_query/'
         input_image_path = '{}{}'.format(image_base_path, image_query)
         input_image = cv2.imread(input_image_path)
         input_image = cv2.cvtColor(input_image, cv2.COLOR_BGR2RGB)

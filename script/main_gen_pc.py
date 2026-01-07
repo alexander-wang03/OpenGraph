@@ -3,7 +3,7 @@
 读取离线的caption和mask，映射到点云
 """
 import sys
-sys.path.append("/code1/dyn/github_repos/OpenGraph")
+sys.path.append("/home/awang/Documents/TRAILbot/OpenGraph")
 import numpy as np
 import cv2
 import torch
@@ -22,7 +22,7 @@ import open3d as o3d
 import hydra
 from omegaconf import DictConfig
 from utils.merge import merge_obj2_into_obj1
-import mos4d.models.models_test as models
+import mos4d.models.models as models
 
 # 一些背景常见的caption：道路，人行道
 # 背景可能产生的标签

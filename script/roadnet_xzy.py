@@ -3,7 +3,7 @@
 根据自动路网构建路网层、环境层、道路层，并上色
 """
 import sys
-sys.path.append("/code1/dyn/github_repos/OpenGraph")
+sys.path.append("/home/awang/Documents/TRAILbot/OpenGraph")
 import os
 import numpy as np
 import open3d as o3d

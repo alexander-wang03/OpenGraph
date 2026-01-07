@@ -15,12 +15,12 @@ import torchvision
 import os
 import sys
 from PIL import Image
-sys.path.append("/home/dyn/multimodal/Grounded-Segment-Anything")
-sys.path.append("/home/dyn/multimodal/Grounded-Segment-Anything/Tag2Text")
+sys.path.append("/home/awang/Documents/TRAILbot/third_parties/recognize-anything")
 
 try:
-    from Tag2Text.models import tag2text
-    from Tag2Text import inference_tag2text, inference_ram
+    from ram.models import tag2text
+    import inference_tag2text as inference_tag2text
+    import inference_ram as inference_ram
     import torchvision.transforms as TS
 except ImportError as e:
     print("Tag2text sub-package not found. Please check your PATH. ")
