@@ -29,7 +29,7 @@ import openai
 from tqdm import trange
 
 try:
-    from ram.models import tag2text
+    from ram.models import tag2text_caption
     import torchvision.transforms as TS
 except ImportError as e:
     print("Tag2text sub-package not found. Please check your PATH. ")
@@ -58,7 +58,7 @@ def load_models(cfg):
     for i in range(3012, 3429):
         delete_tag_index.append(i)
     # load model
-    tagging_model = tag2text.tag2text_caption(pretrained=TAG2TEXT_CHECKPOINT_PATH,
+    tagging_model = tag2text_caption(pretrained=TAG2TEXT_CHECKPOINT_PATH,
                                             image_size=384,
                                             vit='swin_b',
                                             delete_tag_index=delete_tag_index)
