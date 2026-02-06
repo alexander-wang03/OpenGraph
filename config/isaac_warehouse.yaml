@@ -1,0 +1,84 @@
+# ============================================================
+# OpenGraph config for Isaac Sim Warehouse data
+# ============================================================
+# Data collected by: script/collect_isaac_data.py
+# Format: SemanticKITTI (image_2/, velodyne/, poses.txt, calib.txt)
+# ============================================================
+
+# Dataset
+basedir: /home/awang/Documents/TRAILbot/OpenGraph/data/isaac_warehouse
+sequence: !!str 01
+stride: 10                                         # Process every 10th frame
+start: 0
+end: -1                                            # Use all frames
+
+# Caption generation (VLM models — same weights as SemanticKITTI)
+save_vis: !!bool True                              # Save annotated visualizations
+save_cap: !!bool True                              # Save caption data
+save_vis_path: ../results/warehouse_${sequence}/vis/
+save_cap_path: ../results/warehouse_${sequence}/caption/
+tag2text_path: /home/awang/Documents/TRAILbot/third_parties/weights/tag2text_swin_14m.pth
+gd_path: /home/awang/Documents/TRAILbot/third_parties/GroundingDINO/groundingdino/config/GroundingDINO_SwinT_OGC.py
+gd_weights: /home/awang/opengraph_models/GroundingDINO/groundingdino_swint_ogc.pth
+tap_path: /home/awang/Documents/TRAILbot/third_parties/tokenize-anything/weights/tap_vit_l_v1_0.pkl
+tap_merge_path: /home/awang/Documents/TRAILbot/third_parties/tokenize-anything/weights/merged_2560.pkl
+sbert_path: sentence-transformers/all-MiniLM-L6-v2
+
+# Point cloud processing (tuned for indoor warehouse)
+filter_dis: !!bool True                            # Filter distant points
+max_depth: 15                                      # 15m max (indoor, not 100m outdoor)
+bg_rate: 0.80                                      # Background probability threshold
+min_points_threshold: 50                           # Min points per object per frame
+filter_dynamic: !!bool False                       # Disable 4DMOS (not validated for warehouse)
+mos_path: /home/awang/Documents/TRAILbot/third_parties/weights/10_scans.ckpt
+moving_thre: 0.5
+dbscan_remove_noise: !!bool True                   # Denoise via DBSCAN clustering
+dbscan_eps: 0.3                                    # Tighter eps for indoor (was 0.5)
+dbscan_min_points: 15                              # Slightly fewer min points for indoor
+voxel_size: 0.05                                   # Finer voxels for nearby objects (was 0.1)
+vis_all: !!bool False
+
+# Incremental fusion
+use_bg: !!bool True                                # Use background classification
+spatial_weight: 1.0                                # Spatial similarity weight (IoU)
+caption_weight: 0.2                                # Caption similarity weight
+ft_weight: 0.4                                     # Feature similarity weight
+sim_threshold: 0.6                                 # Merge threshold
+llama_ckpt_dir: '/home/awang/Documents/TRAILbot/third_parties/weights/Llama-2-7b/'
+llama_tokenizer_path: '/home/awang/Documents/TRAILbot/third_parties/weights/Llama-2-7b/tokenizer.model'
+llama_max_seq_len: 512
+llama_max_batch_size: 8
+caption_merge_ft: !!bool True
+
+# Map saving and post-processing
+save_pcd: !!bool True
+save_pcd_path: ../results/warehouse_${sequence}/pcd/
+obj_min_points: 30                                 # Lower threshold for indoor objects
+obj_min_detections: 1
+merge_final: !!bool True
+merge_overlap_thresh: 0.1
+merge_ft_thresh: 0.3
+max_caption_num: 4
+class_methods: sbert                               # Use SBERT (avoid Llama for warehouse)
+gpt_max_num: 30
+spacy: !!bool False                                # Disable spacy extraction
+caption_only: !!bool False
+openai_key: ""
+api_base: https://api.openai.com/v1
+class_colors_json: ./class_colors/class_colors.json
+
+# Visualization
+vis_sequence: !!str 01
+result_path: ../results/warehouse_${vis_sequence}/pcd/full_pcd.pkl.gz
+vis_ft_weight: 0.5
+vis_caption_weight: 0.5
+scenegraph_path: ../results/warehouse_${vis_sequence}/pcd/object_relations.json
+scenegraph_vis: !!bool False
+save_image_vis_path: ../results/warehouse_image_query/vis/
+save_image_vis: !!bool False
+no_sbert: !!bool False
+no_tap: !!bool False
+
+# Scene graph
+save_lane_path: ../results/warehouse_${sequence}/graph+road.json
+our_pcd: ../results/warehouse_${sequence}/pcd/our_pc.pcd
