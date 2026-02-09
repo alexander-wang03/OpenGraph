@@ -69,14 +69,25 @@ DEFAULT_K = DEFAULT_P2[:, :3]
 
 # Velodyne→Camera transform (Tr line in SemanticKITTI calib.txt)
 # For the Husky, this is approximately base_link → color_camera
+# This is used for point projection: P2 @ Tr @ points_velodyne = pixels
 DEFAULT_TR = np.array([
     [-5.960463944632e-08, -1.0,                7.232996068751e-08, -1.500106569601e-03],
     [-3.162113404453e-08, -7.232995891115e-08, -1.0,               -3.409403746934e-01],
     [ 1.0,                -5.960464138921e-08, -3.162112993671e-08, -4.399998542302e-01],
 ], dtype=np.float64)
 
-# base_link → camera as 4x4 (same rotation as Tr, used for pose computation)
+# base_link → camera as 4x4 (for transforming points from camera to base_link frame)
 T_BASELINK_TO_CAM = np.vstack([DEFAULT_TR, [0, 0, 0, 1]])
+
+# For poses: we store base_link poses directly, so Tr for pose transformation should be identity.
+# But we still need the real Tr for point projection (P2 @ Tr @ points).
+# OpenGraph's load_poses() does: poses = poses @ T_cam2_velo
+# If we store base_link poses and want them unchanged, we need Tr = identity for that multiplication.
+# However, Tr is also used for projection. So we have a conflict.
+#
+# Solution: Store base_link poses. The Tr will transform them, but since our points are
+# already in base_link frame, the projection P2 @ Tr @ points_baselink will work correctly
+# because Tr transforms base_link→camera, matching what P2 expects.
 
 
 def depth_to_pointcloud(depth_img, K, subsample=4, max_depth=15.0):
@@ -143,6 +154,11 @@ class IsaacDataCollector(Node):
 
         # TF state
         self.latest_tf = None
+
+        # First pose for computing relative poses (like opennav_mem does)
+        # This makes poses relative to starting position, avoiding drift issues
+        self.first_pose = None
+        self.first_pose_inv = None
 
         # Output directories
         self.seq_dir = os.path.join(args.output_dir, args.sequence)
@@ -224,13 +240,30 @@ class IsaacDataCollector(Node):
                 self.latest_tf = transform
 
     def extract_pose(self, tf_msg):
-        """Convert TransformStamped to 4x4 homogeneous matrix."""
+        """Convert TransformStamped to 4x4 homogeneous matrix.
+
+        Returns RELATIVE pose (relative to first frame) to avoid drift issues.
+        This matches what opennav_mem does in run_data_collection.py:
+            base_link_2map_TF = np.dot(first_transformation_matrix_inv, observation[3])
+        """
         t = tf_msg.transform.translation
         r = tf_msg.transform.rotation
         quat = [r.x, r.y, r.z, r.w]
         rot_mat = tf_transformations.quaternion_matrix(quat)
         trans_mat = tf_transformations.translation_matrix([t.x, t.y, t.z])
-        return np.dot(trans_mat, rot_mat)
+        absolute_pose = np.dot(trans_mat, rot_mat)
+
+        # Store first pose and compute its inverse
+        if self.first_pose is None:
+            self.first_pose = absolute_pose.copy()
+            self.first_pose_inv = np.linalg.inv(self.first_pose)
+            self.get_logger().info(
+                f"First pose recorded at ({t.x:.2f}, {t.y:.2f}, {t.z:.2f})"
+            )
+
+        # Return relative pose: first frame will be identity
+        relative_pose = np.dot(self.first_pose_inv, absolute_pose)
+        return relative_pose
 
     # ------------------------------------------------------------------
     # Sensor callbacks
@@ -256,13 +289,10 @@ class IsaacDataCollector(Node):
         intensity = np.ones((points.shape[0], 1), dtype=np.float32)
         points = np.hstack([points.astype(np.float32), intensity])
 
-        # Pose
+        # Store BASE_LINK pose (LiDAR points are already in base_link frame)
         T_world_base = self.extract_pose(tf_msg)
-        # For LiDAR mode, the "velodyne frame" = base_link (identity transform)
-        # Camera pose = T_world_base @ T_base_cam
-        T_world_cam = T_world_base @ T_BASELINK_TO_CAM
 
-        self._save_frame(cv_image, points, T_world_cam, rgb_msg.header.stamp)
+        self._save_frame(cv_image, points, T_world_base, rgb_msg.header.stamp)
 
     def depth_callback(self, rgb_msg, depth_msg, tf_msg):
         """Handle synchronized RGB + Depth + TF."""
@@ -298,25 +328,23 @@ class IsaacDataCollector(Node):
             )
             return
 
-        # Pose: for depth mode, the point cloud is in camera frame.
-        # We store camera poses in poses.txt (SemanticKITTI convention).
-        # OpenGraph's load_poses() will transform by Tr to get "velodyne" frame poses.
-        # Since our points are in camera frame, we want Tr to map camera→camera (identity)
-        # OR we transform points to base_link frame and use the standard Tr.
-        #
-        # Strategy: transform points to base_link frame (our "velodyne" frame)
-        # so the standard Tr (base_link→camera) works correctly.
+        # Transform points from camera frame to base_link frame.
+        # This is our "velodyne" frame - where OpenGraph expects the points.
+        # Projection will use P2 @ Tr @ points, where Tr = base_link→camera.
         T_cam_to_base = np.linalg.inv(T_BASELINK_TO_CAM)
         points_xyz = points[:, :3]
         points_homo = np.hstack([points_xyz, np.ones((points_xyz.shape[0], 1))])
         points_base = (T_cam_to_base @ points_homo.T).T[:, :3]
         points = np.hstack([points_base.astype(np.float32), points[:, 3:4]])
 
-        # Camera pose in world frame
+        # Store BASE_LINK pose in world frame (not camera pose).
+        # OpenGraph's load_poses() multiplies by T_cam2_velo, which will give us
+        # the pose in the "velodyne" frame. Since our velodyne=base_link, this is correct.
+        # The point projection P2 @ Tr @ points works because points are in base_link
+        # and Tr converts base_link→camera.
         T_world_base = self.extract_pose(tf_msg)
-        T_world_cam = T_world_base @ T_BASELINK_TO_CAM
 
-        self._save_frame(cv_image, points, T_world_cam, rgb_msg.header.stamp)
+        self._save_frame(cv_image, points, T_world_base, rgb_msg.header.stamp)
 
     # ------------------------------------------------------------------
     # Save logic

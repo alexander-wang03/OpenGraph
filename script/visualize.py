@@ -236,9 +236,9 @@ def main(cfg : DictConfig):
         vis.create_window(window_name=f'Open3D', width=1280, height=720)
     view_control = vis.get_view_control()
     # 加载视角参数
-    if os.path.isfile(cfg.vis_sequence+"_vis_params.json"):
+    if os.path.isfile(cfg.sequence+"_vis_params.json"):
         global saved_viewpoint
-        loaded_view_params = o3d.io.read_pinhole_camera_parameters(cfg.vis_sequence+"_vis_params.json")
+        loaded_view_params = o3d.io.read_pinhole_camera_parameters(cfg.sequence+"_vis_params.json")
         saved_viewpoint = loaded_view_params
     # 向场景中添加几何图形并创建相应的着色器
     for geometry in pcds:
@@ -531,7 +531,7 @@ def main(cfg : DictConfig):
         saved_viewpoint = view_control.convert_to_pinhole_camera_parameters()
         # 保存视角参数
         view_params = view_control.convert_to_pinhole_camera_parameters()
-        o3d.io.write_pinhole_camera_parameters(cfg.vis_sequence+"_vis_params.json", view_params)
+        o3d.io.write_pinhole_camera_parameters(cfg.sequence+"_vis_params.json", view_params)
         
     def restore_viewpoint(vis):
         global saved_viewpoint

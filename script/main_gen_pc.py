@@ -16,6 +16,7 @@ from datetime import datetime
 from utils.utils import project, gobs_to_detection_list, denoise_objects, filter_objects, merge_objects, accumulate_pc, distance_filter, show_captions, class_objects
 from tqdm import trange
 from some_class.datasets_class import SemanticKittiDataset
+from some_class.datasets_class_isaac import IsaacDataset
 from some_class.map_calss import MapObjectList
 from utils.merge import compute_spatial_similarities, compute_caption_similarities, compute_ft_similarities, aggregate_similarities, merge_detections_to_objects, caption_merge, captions_ft
 import open3d as o3d
@@ -55,8 +56,12 @@ def process_cfg(cfg: DictConfig):
 def main(cfg : DictConfig):
     # 先处理一下cfg
     cfg = process_cfg(cfg)
-    # 加载所使用的数据集
-    datasets = SemanticKittiDataset(cfg.basedir, cfg.sequence, stride=cfg.stride, start=cfg.start, end=cfg.end)
+    # 加载所使用的数据集 (use IsaacDataset for Isaac Sim data, which doesn't apply Tr to poses)
+    dataset_type = getattr(cfg, 'dataset_type', 'semantickitti')
+    if dataset_type == 'isaac':
+        datasets = IsaacDataset(cfg.basedir, cfg.sequence, stride=cfg.stride, start=cfg.start, end=cfg.end)
+    else:
+        datasets = SemanticKittiDataset(cfg.basedir, cfg.sequence, stride=cfg.stride, start=cfg.start, end=cfg.end)
     print("Load a dataset with a size of:", len(datasets))
     # 初始化地图
     objects = MapObjectList(device="cuda")
@@ -167,10 +172,11 @@ def main(cfg : DictConfig):
     objects = filter_objects(cfg, objects)
     objects = merge_objects(cfg, objects)
     # show_captions(objects, bg_objects)
-    # 根据最后的结果，融合物体
-    objects, generator = caption_merge(cfg, objects)
-    # 最后再计算一下融合的caption的特征
+    # 根据最后的结果，融合物体 (skip Llama if caption_merge_ft is False to save GPU memory)
+    generator = None
     if cfg.caption_merge_ft:
+        objects, generator = caption_merge(cfg, objects)
+        # 最后再计算一下融合的caption的特征
         objects, bg_objects = captions_ft(objects, bg_objects, sbert_model)
     # show_captions(objects, bg_objects)
     # 根据最后的结果，分类得到class

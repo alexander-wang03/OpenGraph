@@ -8,6 +8,7 @@
 # Dataset
 basedir: /home/awang/Documents/TRAILbot/OpenGraph/data/isaac_warehouse
 sequence: !!str 01
+dataset_type: isaac                                # Use IsaacDataset (no Tr transform on poses)
 stride: 10                                         # Process every 10th frame
 start: 0
 end: -1                                            # Use all frames
@@ -48,7 +49,7 @@ llama_ckpt_dir: '/home/awang/Documents/TRAILbot/third_parties/weights/Llama-2-7b
 llama_tokenizer_path: '/home/awang/Documents/TRAILbot/third_parties/weights/Llama-2-7b/tokenizer.model'
 llama_max_seq_len: 512
 llama_max_batch_size: 8
-caption_merge_ft: !!bool True
+caption_merge_ft: !!bool False                     # Disable Llama caption merging (saves GPU memory)
 
 # Map saving and post-processing
 save_pcd: !!bool True
@@ -68,11 +69,10 @@ api_base: https://api.openai.com/v1
 class_colors_json: ./class_colors/class_colors.json
 
 # Visualization
-vis_sequence: !!str 01
-result_path: ../results/warehouse_${vis_sequence}/pcd/full_pcd.pkl.gz
+result_path: ../results/warehouse_${sequence}/pcd/full_pcd.pkl.gz
 vis_ft_weight: 0.5
 vis_caption_weight: 0.5
-scenegraph_path: ../results/warehouse_${vis_sequence}/pcd/object_relations.json
+scenegraph_path: ../results/warehouse_${sequence}/pcd/object_relations.json
 scenegraph_vis: !!bool False
 save_image_vis_path: ../results/warehouse_image_query/vis/
 save_image_vis: !!bool False

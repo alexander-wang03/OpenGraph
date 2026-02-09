@@ -17,6 +17,7 @@ import pickle
 from utils.utils import  load_models, project
 from tqdm import trange
 from some_class.datasets_class import SemanticKittiDataset
+from some_class.datasets_class_isaac import IsaacDataset
 import open3d as o3d
 import hydra
 from omegaconf import DictConfig
@@ -38,8 +39,12 @@ def main(cfg : DictConfig):
     cfg = process_cfg(cfg)
     # 加载用到的大模型们，可以实现分割
     mask_generator = load_models(cfg)
-    # 加载所使用的数据集
-    datasets = SemanticKittiDataset(cfg.basedir, cfg.sequence, stride=cfg.stride, start=cfg.start, end=cfg.end)
+    # 加载所使用的数据集 (use IsaacDataset for Isaac Sim data)
+    dataset_type = getattr(cfg, 'dataset_type', 'semantickitti')
+    if dataset_type == 'isaac':
+        datasets = IsaacDataset(cfg.basedir, cfg.sequence, stride=cfg.stride, start=cfg.start, end=cfg.end)
+    else:
+        datasets = SemanticKittiDataset(cfg.basedir, cfg.sequence, stride=cfg.stride, start=cfg.start, end=cfg.end)
     print("Load a dataset with a size of:", len(datasets))
     for idx in trange(len(datasets)):
         image, _, _, _, _ = datasets[idx]
