@@ -1,0 +1,410 @@
+"""
+Warehouse Graph Builder for TierGraph
+
+Implements hierarchical scene graph construction for warehouse environments.
+Assigns objects to a 5-level hierarchy: Zone → Aisle → Shelf → Section → Object
+
+Unlike OpenGraph's flat MST-based scene graph, TierGraph uses fixed warehouse
+geometry to assign objects to their hierarchical locations via geometric
+containment checks.
+
+Author: awang (TierGraph thesis)
+Date: 2026-02-10
+"""
+
+import json
+import numpy as np
+from pathlib import Path
+from typing import Dict, List, Optional, Tuple
+from dataclasses import dataclass
+
+
+@dataclass
+class HierarchyNode:
+    """Represents a node in the warehouse hierarchy."""
+    id: str
+    type: str  # 'zone', 'aisle', 'shelf', 'section', or 'object'
+    name: str
+    bounds: Dict  # {min: {x, y, z}, max: {x, y, z}, center: {x, y, z}}
+    parent_id: Optional[str] = None
+    children: List[str] = None
+
+    def __post_init__(self):
+        if self.children is None:
+            self.children = []
+
+
+class WarehouseGraphBuilder:
+    """
+    Builds hierarchical scene graph for warehouse environments.
+
+    The hierarchy is:
+        Zone (functional areas like storage, receiving, packing)
+         └─ Aisle (corridors between shelves)
+             └─ Shelf (shelving units)
+                 └─ Section (tiers/levels on a shelf)
+                     └─ Object (detected items from OpenGraph)
+    """
+
+    def __init__(self, warehouse_layout_path: str):
+        """
+        Initialize with warehouse layout file.
+
+        Args:
+            warehouse_layout_path: Path to warehouse_layout.json
+        """
+        self.layout_path = Path(warehouse_layout_path)
+        self.layout_data = self._load_layout()
+        self.nodes = {}  # id -> HierarchyNode
+        self.edges = []  # List of (parent_id, child_id, edge_type)
+        self._build_infrastructure()
+
+    def _load_layout(self) -> Dict:
+        """Load warehouse layout from JSON."""
+        with open(self.layout_path, 'r') as f:
+            return json.load(f)
+
+    def _build_infrastructure(self):
+        """Build the infrastructure hierarchy (zones, aisles, shelves, sections)."""
+        # Add functional zones
+        for zone_data in self.layout_data['functional_zones']:
+            zone_node = HierarchyNode(
+                id=zone_data['id'],
+                type='zone',
+                name=zone_data['name'],
+                bounds=zone_data['bounds']
+            )
+            self.nodes[zone_node.id] = zone_node
+
+            # Add aisles within this zone
+            if 'aisles' in zone_data and zone_data['aisles']:
+                for aisle_id, aisle_data in zone_data['aisles'].items():
+                    aisle_node = HierarchyNode(
+                        id=aisle_data['id'],
+                        type='aisle',
+                        name=f"Aisle {aisle_id}",
+                        bounds=aisle_data['bounds'],
+                        parent_id=zone_node.id
+                    )
+                    self.nodes[aisle_node.id] = aisle_node
+                    zone_node.children.append(aisle_node.id)
+                    self.edges.append((zone_node.id, aisle_node.id, 'contains'))
+
+            # Add shelves within this zone
+            if 'shelves' in zone_data and zone_data['shelves']:
+                for shelf_id, shelf_data in zone_data['shelves'].items():
+                    shelf_node = HierarchyNode(
+                        id=shelf_data['id'],
+                        type='shelf',
+                        name=f"Shelf {shelf_id}",
+                        bounds=shelf_data['bounds'],
+                        parent_id=zone_node.id  # Will refine to aisle if applicable
+                    )
+                    self.nodes[shelf_node.id] = shelf_node
+
+                    # Find which aisle this shelf belongs to (based on adjacent_aisles)
+                    adjacent_aisles = shelf_data.get('adjacent_aisles', [])
+                    if adjacent_aisles:
+                        # Assign to first adjacent aisle for now
+                        aisle_id = adjacent_aisles[0]
+                        if aisle_id in self.nodes:
+                            shelf_node.parent_id = aisle_id
+                            self.nodes[aisle_id].children.append(shelf_node.id)
+                            self.edges.append((aisle_id, shelf_node.id, 'contains'))
+                    else:
+                        # No aisle, directly under zone
+                        zone_node.children.append(shelf_node.id)
+                        self.edges.append((zone_node.id, shelf_node.id, 'contains'))
+
+                    # Add sections within this shelf
+                    if 'sections' in shelf_data and shelf_data['sections']:
+                        for section_idx, section_level_data in shelf_data['sections'].items():
+                            # Sections have nested structure: {0: {0: {...}, 1: {...}}, 1: {...}}
+                            if isinstance(section_level_data, dict):
+                                for tier_idx, tier_data in section_level_data.items():
+                                    if isinstance(tier_data, dict) and 'id' in tier_data:
+                                        section_node = HierarchyNode(
+                                            id=tier_data['id'],
+                                            type='section',
+                                            name=f"{shelf_id} Section {section_idx}-{tier_idx}",
+                                            bounds=tier_data['bounds'],
+                                            parent_id=shelf_node.id
+                                        )
+                                        self.nodes[section_node.id] = section_node
+                                        shelf_node.children.append(section_node.id)
+                                        self.edges.append((shelf_node.id, section_node.id, 'contains'))
+
+        print(f"Infrastructure built: {len(self.nodes)} nodes, {len(self.edges)} edges")
+        print(f"  Zones: {sum(1 for n in self.nodes.values() if n.type == 'zone')}")
+        print(f"  Aisles: {sum(1 for n in self.nodes.values() if n.type == 'aisle')}")
+        print(f"  Shelves: {sum(1 for n in self.nodes.values() if n.type == 'shelf')}")
+        print(f"  Sections: {sum(1 for n in self.nodes.values() if n.type == 'section')}")
+
+    def point_in_bounds(self, point: np.ndarray, bounds: Dict) -> bool:
+        """
+        Check if a 3D point is inside a bounding box.
+
+        Args:
+            point: 3D point as [x, y, z]
+            bounds: Dict with 'min' and 'max' keys
+
+        Returns:
+            True if point is inside bounds
+
+        Note: Some bounds (like zones) only have X/Y, not Z. In that case, only check X/Y.
+        """
+        min_pt = bounds['min']
+        max_pt = bounds['max']
+
+        # Check X and Y (always present)
+        if not (min_pt['x'] <= point[0] <= max_pt['x'] and
+                min_pt['y'] <= point[1] <= max_pt['y']):
+            return False
+
+        # Check Z if present (not all bounds have Z)
+        if 'z' in min_pt and 'z' in max_pt:
+            if not (min_pt['z'] <= point[2] <= max_pt['z']):
+                return False
+
+        return True
+
+    def find_containing_zone(self, point: np.ndarray) -> Optional[str]:
+        """Find which zone contains the given point."""
+        for node in self.nodes.values():
+            if node.type == 'zone' and self.point_in_bounds(point, node.bounds):
+                return node.id
+        return None
+
+    def find_containing_aisle(self, point: np.ndarray, zone_id: str) -> Optional[str]:
+        """Find which aisle in the given zone contains the point."""
+        zone_node = self.nodes.get(zone_id)
+        if not zone_node:
+            return None
+
+        for child_id in zone_node.children:
+            child = self.nodes.get(child_id)
+            if child and child.type == 'aisle' and self.point_in_bounds(point, child.bounds):
+                return child_id
+        return None
+
+    def find_containing_shelf(self, point: np.ndarray, aisle_id: Optional[str], zone_id: str) -> Optional[str]:
+        """Find which shelf contains the point (check aisle first, then zone)."""
+        # Check shelves in aisle
+        if aisle_id:
+            aisle_node = self.nodes.get(aisle_id)
+            if aisle_node:
+                for child_id in aisle_node.children:
+                    child = self.nodes.get(child_id)
+                    if child and child.type == 'shelf' and self.point_in_bounds(point, child.bounds):
+                        return child_id
+
+        # Check shelves directly in zone
+        zone_node = self.nodes.get(zone_id)
+        if zone_node:
+            for child_id in zone_node.children:
+                child = self.nodes.get(child_id)
+                if child and child.type == 'shelf' and self.point_in_bounds(point, child.bounds):
+                    return child_id
+
+        return None
+
+    def find_containing_section(self, point: np.ndarray, shelf_id: str) -> Optional[str]:
+        """Find which section on the shelf contains the point."""
+        shelf_node = self.nodes.get(shelf_id)
+        if not shelf_node:
+            return None
+
+        for child_id in shelf_node.children:
+            child = self.nodes.get(child_id)
+            if child and child.type == 'section' and self.point_in_bounds(point, child.bounds):
+                return child_id
+        return None
+
+    def assign_object_to_hierarchy(self, object_id: str, object_position: np.ndarray,
+                                    object_caption: str = "", object_data: Dict = None) -> Tuple[bool, str]:
+        """
+        Assign an OpenGraph object to the warehouse hierarchy.
+
+        Args:
+            object_id: Unique ID for the object
+            object_position: 3D centroid position [x, y, z]
+            object_caption: Object description from OpenGraph
+            object_data: Additional object data (pcd, features, etc.)
+
+        Returns:
+            (success, hierarchy_path): Success flag and string describing the assignment
+        """
+        # Step 1: Find containing zone
+        zone_id = self.find_containing_zone(object_position)
+        if not zone_id:
+            return False, f"Object {object_id} not in any zone"
+
+        # Step 2: Find containing aisle (optional)
+        aisle_id = self.find_containing_aisle(object_position, zone_id)
+
+        # Step 3: Find containing shelf
+        shelf_id = self.find_containing_shelf(object_position, aisle_id, zone_id)
+        if not shelf_id:
+            # Object in zone/aisle but not on shelf (e.g., on floor)
+            parent_id = aisle_id if aisle_id else zone_id
+            object_node = HierarchyNode(
+                id=object_id,
+                type='object',
+                name=object_caption if object_caption else f"Object {object_id}",
+                bounds={'center': {'x': object_position[0], 'y': object_position[1], 'z': object_position[2]}},
+                parent_id=parent_id
+            )
+            self.nodes[object_id] = object_node
+            self.nodes[parent_id].children.append(object_id)
+            self.edges.append((parent_id, object_id, 'contains'))
+
+            path = f"{zone_id}"
+            if aisle_id:
+                path += f" → {aisle_id}"
+            path += f" → {object_id}"
+            return True, path
+
+        # Step 4: Find containing section
+        section_id = self.find_containing_section(object_position, shelf_id)
+        if not section_id:
+            # Object on shelf but not in any section
+            object_node = HierarchyNode(
+                id=object_id,
+                type='object',
+                name=object_caption if object_caption else f"Object {object_id}",
+                bounds={'center': {'x': object_position[0], 'y': object_position[1], 'z': object_position[2]}},
+                parent_id=shelf_id
+            )
+            self.nodes[object_id] = object_node
+            self.nodes[shelf_id].children.append(object_id)
+            self.edges.append((shelf_id, object_id, 'contains'))
+
+            path = f"{zone_id}"
+            if aisle_id:
+                path += f" → {aisle_id}"
+            path += f" → {shelf_id} → {object_id}"
+            return True, path
+
+        # Step 5: Assign to section (full hierarchy)
+        object_node = HierarchyNode(
+            id=object_id,
+            type='object',
+            name=object_caption if object_caption else f"Object {object_id}",
+            bounds={'center': {'x': object_position[0], 'y': object_position[1], 'z': object_position[2]}},
+            parent_id=section_id
+        )
+        self.nodes[object_id] = object_node
+        self.nodes[section_id].children.append(object_id)
+        self.edges.append((section_id, object_id, 'contains'))
+
+        path = f"{zone_id}"
+        if aisle_id:
+            path += f" → {aisle_id}"
+        path += f" → {shelf_id} → {section_id} → {object_id}"
+        return True, path
+
+    def export_graph(self, output_path: str):
+        """
+        Export the hierarchical scene graph to JSON.
+
+        Args:
+            output_path: Path to save JSON file
+        """
+        # Convert nodes to serializable format
+        nodes_data = []
+        for node in self.nodes.values():
+            node_dict = {
+                'id': node.id,
+                'type': node.type,
+                'name': node.name,
+                'bounds': node.bounds,
+                'parent_id': node.parent_id,
+                'children': node.children
+            }
+            nodes_data.append(node_dict)
+
+        # Build edges list
+        edges_data = [
+            {'source': src, 'target': dst, 'type': edge_type}
+            for src, dst, edge_type in self.edges
+        ]
+
+        # Compute statistics
+        stats = {
+            'total_nodes': len(self.nodes),
+            'total_edges': len(self.edges),
+            'nodes_by_type': {
+                'zone': sum(1 for n in self.nodes.values() if n.type == 'zone'),
+                'aisle': sum(1 for n in self.nodes.values() if n.type == 'aisle'),
+                'shelf': sum(1 for n in self.nodes.values() if n.type == 'shelf'),
+                'section': sum(1 for n in self.nodes.values() if n.type == 'section'),
+                'object': sum(1 for n in self.nodes.values() if n.type == 'object'),
+            },
+            'max_depth': self._compute_max_depth()
+        }
+
+        graph_data = {
+            'metadata': {
+                'type': 'TierGraph',
+                'description': 'Hierarchical warehouse scene graph',
+                'hierarchy_levels': 5,
+                'warehouse_layout': str(self.layout_path)
+            },
+            'statistics': stats,
+            'nodes': nodes_data,
+            'edges': edges_data
+        }
+
+        with open(output_path, 'w') as f:
+            json.dump(graph_data, f, indent=2)
+
+        print(f"\nTierGraph exported to {output_path}")
+        print(f"  Total nodes: {stats['total_nodes']}")
+        print(f"  Total edges: {stats['total_edges']}")
+        print(f"  Objects assigned: {stats['nodes_by_type']['object']}")
+        print(f"  Max hierarchy depth: {stats['max_depth']}")
+
+    def _compute_max_depth(self) -> int:
+        """Compute the maximum depth of the hierarchy tree."""
+        def get_depth(node_id, visited=None):
+            if visited is None:
+                visited = set()
+            if node_id in visited:
+                return 0
+            visited.add(node_id)
+
+            node = self.nodes.get(node_id)
+            if not node or not node.children:
+                return 1
+            return 1 + max(get_depth(child_id, visited.copy()) for child_id in node.children)
+
+        # Find root nodes (zones)
+        roots = [n.id for n in self.nodes.values() if n.type == 'zone']
+        if not roots:
+            return 0
+        return max(get_depth(root_id) for root_id in roots)
+
+    def print_summary(self):
+        """Print a summary of the hierarchical scene graph."""
+        print("\n" + "="*60)
+        print("TIERGRAPH SUMMARY")
+        print("="*60)
+
+        stats = {
+            'zone': sum(1 for n in self.nodes.values() if n.type == 'zone'),
+            'aisle': sum(1 for n in self.nodes.values() if n.type == 'aisle'),
+            'shelf': sum(1 for n in self.nodes.values() if n.type == 'shelf'),
+            'section': sum(1 for n in self.nodes.values() if n.type == 'section'),
+            'object': sum(1 for n in self.nodes.values() if n.type == 'object'),
+        }
+
+        print(f"Total nodes: {len(self.nodes)}")
+        print(f"Total edges: {len(self.edges)}")
+        print(f"\nNodes by level:")
+        print(f"  Level 1 (Zones):    {stats['zone']}")
+        print(f"  Level 2 (Aisles):   {stats['aisle']}")
+        print(f"  Level 3 (Shelves):  {stats['shelf']}")
+        print(f"  Level 4 (Sections): {stats['section']}")
+        print(f"  Level 5 (Objects):  {stats['object']}")
+        print(f"\nMax depth: {self._compute_max_depth()}")
+        print("="*60 + "\n")

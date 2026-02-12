@@ -412,6 +412,13 @@ class IsaacDataCollector(Node):
         with open(calib_path, "w") as f:
             f.write(format_calib(DEFAULT_P2, DEFAULT_TR))
 
+        # first_pose.txt: Save absolute first pose for coordinate alignment
+        if self.first_pose is not None:
+            first_pose_path = os.path.join(self.seq_dir, "first_pose.txt")
+            pose_flat = self.first_pose[:3, :].flatten()
+            np.savetxt(first_pose_path, pose_flat.reshape(1, -1), fmt='%.12e')
+            self.get_logger().info(f"  First pose: {first_pose_path}")
+
         # Summary
         duration = 0.0
         if len(self.timestamps) > 1:
