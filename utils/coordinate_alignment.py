@@ -118,7 +118,45 @@ def transform_warehouse_layout(layout: Dict, transform: np.ndarray) -> Dict:
     import copy
     transformed_layout = copy.deepcopy(layout)
 
-    # Transform functional zones
+    # Transform floor vertices
+    if 'floor' in transformed_layout and 'vertices' in transformed_layout['floor']:
+        floor_vertices = transformed_layout['floor']['vertices']
+        floor_z = transformed_layout['floor']['bounds']['min'].get('z', 0.0)
+
+        # Transform each vertex
+        transformed_vertices = []
+        for vertex in floor_vertices:
+            vertex_3d = np.array([vertex[0], vertex[1], floor_z, 1.0])
+            vertex_transformed = T_inv @ vertex_3d
+            transformed_vertices.append([float(vertex_transformed[0]), float(vertex_transformed[1])])
+
+        transformed_layout['floor']['vertices'] = transformed_vertices
+
+        # Recompute floor bounds from transformed vertices
+        if transformed_vertices:
+            xs = [v[0] for v in transformed_vertices]
+            ys = [v[1] for v in transformed_vertices]
+            transformed_layout['floor']['bounds'] = {
+                'min': {'x': min(xs), 'y': min(ys), 'z': floor_z},
+                'max': {'x': max(xs), 'y': max(ys), 'z': floor_z},
+                'center': {'x': (min(xs) + max(xs)) / 2, 'y': (min(ys) + max(ys)) / 2, 'z': floor_z},
+                'size': {'x': max(xs) - min(xs), 'y': max(ys) - min(ys), 'z': 0.0}
+            }
+
+    # Transform functional zone vertices (for General zone polygon)
+    for zone in transformed_layout['functional_zones']:
+        if 'vertices' in zone and zone['vertices']:
+            zone_z = zone['bounds']['min'].get('z', 0.0) if 'bounds' in zone else 0.0
+
+            transformed_zone_verts = []
+            for vertex in zone['vertices']:
+                vertex_3d = np.array([vertex[0], vertex[1], zone_z, 1.0])
+                vertex_transformed = T_inv @ vertex_3d
+                transformed_zone_verts.append([float(vertex_transformed[0]), float(vertex_transformed[1])])
+
+            zone['vertices'] = transformed_zone_verts
+
+    # Transform functional zone bounds
     for zone in transformed_layout['functional_zones']:
         zone['bounds'] = transform_bounds(zone['bounds'])
 

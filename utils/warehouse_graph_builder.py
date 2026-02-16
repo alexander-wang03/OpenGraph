@@ -169,10 +169,23 @@ class WarehouseGraphBuilder:
         return True
 
     def find_containing_zone(self, point: np.ndarray) -> Optional[str]:
-        """Find which zone contains the given point."""
+        """
+        Find which zone contains the given point.
+
+        Priority order: Check all non-General zones first, then General as fallback.
+        This prevents objects from being assigned to General when they're actually
+        in a more specific zone (since General's bounds may overlap other zones).
+        """
+        # First pass: check all non-General zones
         for node in self.nodes.values():
-            if node.type == 'zone' and self.point_in_bounds(point, node.bounds):
+            if node.type == 'zone' and node.id != 'zone_general' and self.point_in_bounds(point, node.bounds):
                 return node.id
+
+        # Second pass: check General zone as fallback
+        for node in self.nodes.values():
+            if node.type == 'zone' and node.id == 'zone_general' and self.point_in_bounds(point, node.bounds):
+                return node.id
+
         return None
 
     def find_containing_aisle(self, point: np.ndarray, zone_id: str) -> Optional[str]:

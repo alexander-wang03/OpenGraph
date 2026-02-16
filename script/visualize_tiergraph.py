@@ -1,33 +1,13 @@
 #!/usr/bin/env python3
 """
-Visualize TierGraph - Hierarchical Warehouse Scene Graph
+Visualize TierGraph in Isaac Sim GLOBAL coordinates (not robot-relative).
 
-Visualizes TierGraph results with:
-- Infrastructure bounding boxes (zones, aisles, shelves, sections)
-- Object point clouds with hierarchical coloring (Z-offset corrected)
-- Hierarchy connections (parent → child edges)
-
-IMPORTANT: This script applies a Z offset (+0.781m) to OpenGraph point clouds
-to align them with the warehouse layout coordinate frame. The warehouse layout
-has floor at Z=0.0m after alignment, but OpenGraph point clouds are in robot
-frame where floor is at Z≈-0.781m (robot base_link is 0.641m above floor).
+This version visualizes the warehouse layout in the original Isaac Sim global
+frame, making it match the warehouse_layout.json visualization. Point clouds
+are transformed from robot frame back to global frame.
 
 Usage:
-    python script/visualize_tiergraph.py --config-name=isaac_warehouse sequence=02
-
-Controls:
-    - [1] Show/hide zone bounding boxes
-    - [2] Show/hide aisle bounding boxes
-    - [3] Show/hide shelf bounding boxes
-    - [4] Show/hide section bounding boxes
-    - [5] Show/hide hierarchy edges
-    - [6] Color by hierarchy level
-    - [I] Color by instance
-    - [R] Color by RGB (original colors)
-    - [Q] Exit
-
-Author: awang (TierGraph thesis)
-Date: 2026-02-10 (Z-offset fix: 2026-02-10)
+    python script/visualize_tiergraph_global.py --config-name=isaac_warehouse sequence=02
 """
 
 import sys
@@ -42,130 +22,211 @@ import open3d as o3d
 from pathlib import Path
 from omegaconf import DictConfig
 from some_class.map_calss import MapObjectList
-from utils.coordinate_alignment import get_aligned_warehouse_layout
-import distinctipy
+from utils.coordinate_alignment import load_absolute_first_pose
 
 
-def compute_point_cloud_z_offset(objects, sample_size=10):
+def transform_points_to_global(points, T_first):
     """
-    Compute Z offset needed to align point clouds with warehouse layout.
-
-    Estimates the floor Z coordinate from point clouds and computes offset
-    to bring floor to Z=0.0m (matching the warehouse layout).
+    Transform points from robot-relative frame to Isaac Sim global frame.
 
     Args:
-        objects: MapObjectList from OpenGraph
-        sample_size: Number of objects to sample for floor estimation
+        points: Nx3 array of points in robot frame
+        T_first: 4x4 first pose matrix (robot's starting pose in global frame)
 
     Returns:
-        Z offset to apply to point clouds
+        Nx3 array of points in global frame
     """
-    floor_z_estimates = []
+    # Add homogeneous coordinate
+    points_homo = np.hstack([points, np.ones((len(points), 1))])
 
-    for obj in objects[:sample_size]:
-        points = np.asarray(obj['pcd'].points)
-        if len(points) == 0:
-            continue
+    # Transform: global = T_first @ robot
+    points_global = (T_first @ points_homo.T).T[:, :3]
 
-        # Floor should be in bottom 5th percentile
-        z_coords = points[:, 2]
-        floor_candidates = z_coords[z_coords < np.percentile(z_coords, 5)]
-
-        if len(floor_candidates) > 0:
-            floor_z_estimates.append(np.median(floor_candidates))
-
-    if not floor_z_estimates:
-        print("Warning: Could not estimate floor Z, using default offset 0.781m")
-        return 0.781
-
-    floor_z = np.median(floor_z_estimates)
-    offset = -floor_z  # Bring floor from floor_z to 0.0
-
-    print(f"Computed Z offset from point clouds: {offset:.3f}m")
-    print(f"  (Floor at Z={floor_z:.3f}m in robot frame → Z=0.0m after offset)")
-
-    return offset
-
-
-# Visualization utilities (from OpenGraph)
-def create_bbox_lineset(bounds, color=[1, 0, 0]):
-    """Create Open3D lineset for a bounding box."""
-    min_pt = bounds['min']
-    max_pt = bounds['max']
-
-    # Get Z bounds (default to 0 and 3m if not specified)
-    min_z = min_pt.get('z', 0.0)
-    max_z = max_pt.get('z', 3.0)
-
-    # 8 corners of the box
-    corners = np.array([
-        [min_pt['x'], min_pt['y'], min_z],
-        [max_pt['x'], min_pt['y'], min_z],
-        [max_pt['x'], max_pt['y'], min_z],
-        [min_pt['x'], max_pt['y'], min_z],
-        [min_pt['x'], min_pt['y'], max_z],
-        [max_pt['x'], min_pt['y'], max_z],
-        [max_pt['x'], max_pt['y'], max_z],
-        [min_pt['x'], max_pt['y'], max_z],
-    ])
-
-    # 12 edges connecting the corners
-    lines = [
-        [0, 1], [1, 2], [2, 3], [3, 0],  # Bottom face
-        [4, 5], [5, 6], [6, 7], [7, 4],  # Top face
-        [0, 4], [1, 5], [2, 6], [3, 7],  # Vertical edges
-    ]
-
-    lineset = o3d.geometry.LineSet()
-    lineset.points = o3d.utility.Vector3dVector(corners)
-    lineset.lines = o3d.utility.Vector2iVector(lines)
-    lineset.colors = o3d.utility.Vector3dVector([color] * len(lines))
-
-    return lineset
-
-
-def create_ball_mesh(center, radius, color=(0, 1, 0)):
-    """Create a ball mesh at the given center."""
-    mesh_sphere = o3d.geometry.TriangleMesh.create_sphere(radius=radius)
-    mesh_sphere.translate(center)
-    mesh_sphere.paint_uniform_color(color)
-    return mesh_sphere
-
-
-def create_hierarchy_edge(point1, point2, color=[0, 1, 0], radius=0.02):
-    """Create a cylinder connecting two points (parent-child relationship)."""
-    # Create line between points
-    direction = point2 - point1
-    length = np.linalg.norm(direction)
-
-    if length < 0.01:  # Too short to visualize
-        return []
-
-    direction = direction / length
-
-    # Create cylinder
-    cylinder = o3d.geometry.TriangleMesh.create_cylinder(radius=radius, height=length)
-
-    # Align cylinder with the direction
-    z_axis = np.array([0, 0, 1])
-    rotation_axis = np.cross(z_axis, direction)
-    if np.linalg.norm(rotation_axis) > 1e-6:
-        rotation_axis = rotation_axis / np.linalg.norm(rotation_axis)
-        angle = np.arccos(np.clip(np.dot(z_axis, direction), -1.0, 1.0))
-        R = o3d.geometry.get_rotation_matrix_from_axis_angle(rotation_axis * angle)
-        cylinder.rotate(R, center=[0, 0, 0])
-
-    # Translate to position
-    cylinder.translate(point1 + direction * length / 2)
-    cylinder.paint_uniform_color(color)
-
-    return [cylinder]
+    return points_global
 
 
 def load_tiergraph(graph_path):
     """Load TierGraph JSON."""
     with open(graph_path, 'r') as f:
         return json.load(f)
+
+
+def build_object_hierarchy_map(tiergraph):
+    """
+    Build mapping from object IDs to their hierarchical assignments.
+
+    Returns:
+        dict: {object_id: {'zone': zone_id, 'section': section_id or None}}
+    """
+    obj_map = {}
+
+    nodes = tiergraph.get('nodes', [])
+
+    # Build parent lookups
+    node_lookup = {node['id']: node for node in nodes}
+
+    for node in nodes:
+        if node['type'] == 'object':
+            obj_id = node['id']
+            obj_map[obj_id] = {'zone': None, 'section': None, 'shelf': None}
+
+            # Traverse up the hierarchy to find zone and section
+            current = node
+            while current:
+                parent_id = current.get('parent_id')
+                if not parent_id:
+                    break
+
+                parent = node_lookup.get(parent_id)
+                if not parent:
+                    break
+
+                if parent['type'] == 'zone':
+                    obj_map[obj_id]['zone'] = parent['id']
+                elif parent['type'] == 'section':
+                    obj_map[obj_id]['section'] = parent['id']
+                elif parent['type'] == 'shelf':
+                    obj_map[obj_id]['shelf'] = parent['id']
+
+                current = parent
+
+    return obj_map
+
+
+def get_hierarchical_colors(obj_map, num_objects):
+    """
+    Generate colors based on hierarchical assignments.
+
+    Objects in same section get same color.
+    Objects in same zone (but different sections) get similar hues.
+
+    Returns:
+        list: Colors for each object index
+    """
+    import colorsys
+
+    # Zone to base hue mapping
+    zone_hues = {
+        'zone_storage': 0.55,      # Blue range
+        'zone_receiving': 0.33,    # Green range
+        'zone_packing': 0.08,      # Orange range
+        'zone_pallet_truck': 0.83, # Purple range
+        'zone_hub_robot': 0.66,    # Cyan range
+        'zone_forklift': 0.16,     # Yellow range
+        'zone_general': 0.0,       # Red range
+    }
+
+    # Group objects by section (or zone if no section)
+    section_to_objects = {}
+    zone_only_objects = {}
+    unassigned_objects = []
+
+    for obj_idx, (obj_id, assignment) in enumerate(obj_map.items()):
+        if assignment['section']:
+            # Has section assignment
+            section_id = assignment['section']
+            if section_id not in section_to_objects:
+                section_to_objects[section_id] = []
+            section_to_objects[section_id].append(obj_idx)
+        elif assignment['zone']:
+            # Has zone but no section
+            zone_id = assignment['zone']
+            if zone_id not in zone_only_objects:
+                zone_only_objects[zone_id] = []
+            zone_only_objects[zone_id].append(obj_idx)
+        else:
+            # Unassigned
+            unassigned_objects.append(obj_idx)
+
+    colors = [[0.5, 0.5, 0.5]] * num_objects  # Default gray
+
+    # Color objects by section (same section = same color)
+    section_ids = list(section_to_objects.keys())
+    for i, section_id in enumerate(section_ids):
+        # Extract zone from section_id (format: "shelf_X_section_Y_tier_Z")
+        zone_id = 'zone_storage'  # Sections are only in storage zone
+        base_hue = zone_hues.get(zone_id, 0.5)
+
+        # Vary hue slightly for different sections in same zone
+        hue = base_hue + (i * 0.05) % 0.15 - 0.075  # Slight variation
+        saturation = 0.7
+        value = 0.9
+
+        rgb = colorsys.hsv_to_rgb(hue, saturation, value)
+
+        for obj_idx in section_to_objects[section_id]:
+            colors[obj_idx] = list(rgb)
+
+    # Color zone-only objects (different shade per zone)
+    for zone_id, obj_indices in zone_only_objects.items():
+        base_hue = zone_hues.get(zone_id, 0.5)
+
+        # Spread objects in this zone across hue range
+        for i, obj_idx in enumerate(obj_indices):
+            hue = base_hue + (i * 0.08) % 0.2 - 0.1
+            saturation = 0.5
+            value = 0.8
+            rgb = colorsys.hsv_to_rgb(hue, saturation, value)
+            colors[obj_idx] = list(rgb)
+
+    # Unassigned objects get gray
+    for obj_idx in unassigned_objects:
+        colors[obj_idx] = [0.4, 0.4, 0.4]
+
+    return colors
+
+
+def print_color_legend(obj_map, objects):
+    """Print color legend showing hierarchical assignments."""
+    # Count objects per zone and section
+    zone_counts = {}
+    section_counts = {}
+    unassigned_count = 0
+
+    for assignment in obj_map.values():
+        if assignment['section']:
+            section_id = assignment['section']
+            section_counts[section_id] = section_counts.get(section_id, 0) + 1
+        elif assignment['zone']:
+            zone_id = assignment['zone']
+            zone_counts[zone_id] = zone_counts.get(zone_id, 0) + 1
+        else:
+            unassigned_count += 1
+
+    print("\n" + "="*60)
+    print("COLOR LEGEND")
+    print("="*60)
+    print("\nInfrastructure:")
+    print("  Floor:      Dark gray mesh")
+    print("  Zones:      Colored wireframe boxes")
+    print("    - Storage zone:   Green")
+    print("    - Receiving:      Orange")
+    print("    - Packing:        Magenta")
+    print("  Shelves:    Blue wireframe boxes")
+    print("  Sections:   Yellow wireframe boxes")
+
+    print(f"\nObjects (total: {len(objects)}):")
+    print("  Boundaries: White wireframe boxes (NEW!)")
+    print("  Point clouds colored by zone/section:")
+    print("    - Same section → Same color (blue shades)")
+    print("    - Same zone → Similar hue")
+    print("    - Unassigned → Gray")
+
+    if section_counts:
+        print(f"\n  Objects in shelf sections: {sum(section_counts.values())}")
+        top_sections = sorted(section_counts.items(), key=lambda x: x[1], reverse=True)[:5]
+        for section_id, count in top_sections:
+            print(f"    {section_id}: {count} objects")
+
+    if zone_counts:
+        print(f"\n  Objects in zones (not in sections): {sum(zone_counts.values())}")
+        for zone_id, count in sorted(zone_counts.items()):
+            print(f"    {zone_id}: {count} objects")
+
+    if unassigned_count > 0:
+        print(f"\n  Unassigned objects: {unassigned_count}")
+
+    print("="*60 + "\n")
 
 
 def load_opengraph_results(result_path):
@@ -191,266 +252,275 @@ def load_opengraph_results(result_path):
     return objects, bg_objects
 
 
+def create_bbox_lineset(bounds, color=[1, 0, 0]):
+    """Create Open3D lineset for a bounding box."""
+    min_pt = bounds['min']
+    max_pt = bounds['max']
+    min_z = min_pt.get('z', 0.0)
+    max_z = max_pt.get('z', 3.0)
+
+    corners = np.array([
+        [min_pt['x'], min_pt['y'], min_z],
+        [max_pt['x'], min_pt['y'], min_z],
+        [max_pt['x'], max_pt['y'], min_z],
+        [min_pt['x'], max_pt['y'], min_z],
+        [min_pt['x'], min_pt['y'], max_z],
+        [max_pt['x'], min_pt['y'], max_z],
+        [max_pt['x'], max_pt['y'], max_z],
+        [min_pt['x'], max_pt['y'], max_z],
+    ])
+
+    lines = [
+        [0, 1], [1, 2], [2, 3], [3, 0],  # Bottom
+        [4, 5], [5, 6], [6, 7], [7, 4],  # Top
+        [0, 4], [1, 5], [2, 6], [3, 7],  # Vertical
+    ]
+
+    lineset = o3d.geometry.LineSet()
+    lineset.points = o3d.utility.Vector3dVector(corners)
+    lineset.lines = o3d.utility.Vector2iVector(lines)
+    lineset.colors = o3d.utility.Vector3dVector([color] * len(lines))
+
+    return lineset
+
+
+def create_floor_mesh(floor_vertices, floor_z=-0.14, color=[0.5, 0.5, 0.5]):
+    """Create Open3D mesh for floor polygon."""
+    vertices_3d = []
+    for v in floor_vertices:
+        # Floor vertices are stored as [x, y] arrays
+        if isinstance(v, (list, tuple)):
+            vertices_3d.append([v[0], v[1], floor_z])
+        else:
+            vertices_3d.append([v['x'], v['y'], floor_z])
+
+    vertices_3d = np.array(vertices_3d)
+
+    # Create triangles for the floor polygon using fan triangulation
+    # Assumes vertices are in order (convex or simple polygon)
+    num_vertices = len(vertices_3d)
+    triangles = []
+    for i in range(1, num_vertices - 1):
+        triangles.append([0, i, i + 1])
+
+    mesh = o3d.geometry.TriangleMesh()
+    mesh.vertices = o3d.utility.Vector3dVector(vertices_3d)
+    mesh.triangles = o3d.utility.Vector3iVector(triangles)
+    mesh.paint_uniform_color(color)
+    mesh.compute_vertex_normals()
+
+    return mesh
+
+
 @hydra.main(version_base=None, config_path="../config", config_name="isaac_warehouse")
 def main(cfg: DictConfig):
     print("\n" + "="*60)
-    print("TIERGRAPH VISUALIZATION")
+    print("TIERGRAPH VISUALIZATION (ISAAC SIM GLOBAL FRAME)")
     print("="*60 + "\n")
 
-    # Load data
+    # Paths
     result_path = Path(cfg.result_path)
-    graph_path = Path(cfg.scenegraph_path)
+    sequence_dir = Path(cfg.basedir) / cfg.sequence
+    warehouse_layout_path = "/home/awang/Documents/TRAILbot/Isaac-sim-husky-navigation/src/isaaccomponentspython/Data/warehouse_layout.json"
+    tiergraph_path = Path(cfg.scenegraph_path)
 
+    # Load data
     print(f"Loading OpenGraph results from {result_path}...")
     objects, bg_objects = load_opengraph_results(result_path)
     print(f"  Loaded {len(objects)} objects")
 
-    print(f"Loading TierGraph from {graph_path}...")
-    tiergraph = load_tiergraph(graph_path)
-    print(f"  Loaded {tiergraph['statistics']['total_nodes']} nodes")
-    print(f"  Loaded {tiergraph['statistics']['total_edges']} edges")
+    print(f"Loading TierGraph from {tiergraph_path}...")
+    tiergraph = load_tiergraph(tiergraph_path)
+    print(f"  Loaded {len(tiergraph.get('nodes', []))} nodes")
 
-    # Build node lookup
-    nodes_by_id = {node['id']: node for node in tiergraph['nodes']}
+    print(f"Loading ORIGINAL warehouse layout (Isaac Sim global coordinates)...")
+    with open(warehouse_layout_path, 'r') as f:
+        warehouse_layout = json.load(f)
 
-    # Prepare colors
-    hierarchy_colors = {
-        'zone': [1.0, 0.0, 0.0],      # Red
-        'aisle': [0.0, 1.0, 0.0],     # Green
-        'shelf': [0.0, 0.0, 1.0],     # Blue
-        'section': [1.0, 1.0, 0.0],   # Yellow
-        'object': [1.0, 0.0, 1.0],    # Magenta
-    }
+    # Load first pose for transforming point clouds
+    T_first = load_absolute_first_pose(sequence_dir)
+    has_first_pose = not np.allclose(T_first, np.eye(4))
 
-    # Generate instance colors
-    instance_colors = distinctipy.get_colors(len(objects), pastel_factor=0.5)
-    instance_colors_dict = {f"object_{i}": c for i, c in enumerate(instance_colors)}
+    if has_first_pose:
+        print(f"Found first_pose.txt - will transform point clouds to global frame")
+        print(f"  Robot starting pose: [{T_first[0, 3]:.2f}, {T_first[1, 3]:.2f}, {T_first[2, 3]:.2f}]")
+    else:
+        print("WARNING: No first_pose.txt found - point clouds may not align with warehouse")
 
-    # Create geometries
-    print("\nCreating visualizations...")
+    # Compute Z offset for point clouds
+    # In robot frame, floor is at Z≈-0.7m
+    # In global frame, floor is at Z=-0.14m
+    # We need to add the difference
+    ROBOT_FLOOR_Z = -0.781  # From compute_floor_offset.py
+    ISAAC_FLOOR_Z = -0.14
+    Z_OFFSET = ISAAC_FLOOR_Z - ROBOT_FLOOR_Z  # ≈ +0.641m
 
-    # 1. Object point clouds (with Z offset to align with warehouse layout)
-    # CRITICAL: OpenGraph point clouds are in robot frame (floor at Z≈-0.781m)
-    # but warehouse bounding boxes are offset to have floor at Z=0.0m
-    # Compute the Z offset dynamically from the point cloud data
-    POINT_CLOUD_Z_OFFSET = compute_point_cloud_z_offset(objects, sample_size=20)
-
+    # Transform point clouds to global frame
+    print("\nTransforming point clouds to global frame...")
     pcds = []
-    object_centers = {}
     for i, obj in enumerate(objects):
-        # Get original point cloud points and colors
-        original_pcd = obj['pcd']
-        points = np.asarray(original_pcd.points).copy()
+        # Get points in robot frame
+        points_robot = np.asarray(obj['pcd'].points).copy()
 
-        # Apply Z offset to align with warehouse coordinate frame
-        points[:, 2] += POINT_CLOUD_Z_OFFSET
+        # Transform to global frame
+        if has_first_pose:
+            # Apply XY rotation/translation from first_pose
+            points_global = transform_points_to_global(points_robot, T_first)
+            # CRITICAL: Also apply Z offset correction
+            # first_pose.txt has wrong Z (0.00m), but robot is actually 0.641m above floor
+            # This brings floor from -0.781m to -0.14m in global frame
+            points_global[:, 2] += Z_OFFSET
+        else:
+            # No first_pose - just apply Z offset
+            points_global = points_robot.copy()
+            points_global[:, 2] += Z_OFFSET
 
-        # Create new point cloud with transformed points
+        # Create new point cloud
         pcd = o3d.geometry.PointCloud()
-        pcd.points = o3d.utility.Vector3dVector(points)
+        pcd.points = o3d.utility.Vector3dVector(points_global)
 
-        # Copy colors if they exist
-        if original_pcd.has_colors():
-            pcd.colors = original_pcd.colors
+        if obj['pcd'].has_colors():
+            pcd.colors = obj['pcd'].colors
 
         pcds.append(pcd)
 
-        # Store center for hierarchy edges (after offset)
-        center = np.mean(points, axis=0)
-        object_centers[f"object_{i}"] = center
+    # Build object hierarchy mapping
+    print("\nBuilding hierarchical color scheme...")
+    obj_hierarchy_map = build_object_hierarchy_map(tiergraph)
+    instance_colors = get_hierarchical_colors(obj_hierarchy_map, len(objects))
 
-    # 2. Infrastructure bounding boxes
+    # Print color legend
+    print_color_legend(obj_hierarchy_map, objects)
+
+    # Create infrastructure bounding boxes from ORIGINAL warehouse layout
+    print("Creating infrastructure visualization...")
+
+    # 1. Create floor mesh
+    floor_mesh = create_floor_mesh(
+        warehouse_layout['floor']['vertices'],
+        floor_z=-0.14,
+        color=[0.3, 0.3, 0.3]
+    )
+    print(f"  Created floor mesh with {len(warehouse_layout['floor']['vertices'])} vertices")
+
+    # 2. Create zone bounding boxes
     zone_boxes = []
-    aisle_boxes = []
-    shelf_boxes = []
-    section_boxes = []
+    for zone in warehouse_layout['functional_zones']:
+        # Compute Z bounds for this zone
+        min_z = -0.14  # Floor level
+        max_z = -0.14  # Start at floor, will update with shelf heights
 
-    for node in tiergraph['nodes']:
-        if node['type'] == 'zone':
-            lineset = create_bbox_lineset(node['bounds'], hierarchy_colors['zone'])
-            zone_boxes.append(lineset)
-            # Store center for edges
-            center = node['bounds']['center']
-            object_centers[node['id']] = np.array([center['x'], center['y'], center.get('z', 1.5)])
-        elif node['type'] == 'aisle':
-            lineset = create_bbox_lineset(node['bounds'], hierarchy_colors['aisle'])
-            aisle_boxes.append(lineset)
-            center = node['bounds']['center']
-            object_centers[node['id']] = np.array([center['x'], center['y'], center.get('z', 1.5)])
-        elif node['type'] == 'shelf':
-            lineset = create_bbox_lineset(node['bounds'], hierarchy_colors['shelf'])
-            shelf_boxes.append(lineset)
-            center = node['bounds']['center']
-            object_centers[node['id']] = np.array([center['x'], center['y'], center.get('z', 1.5)])
-        elif node['type'] == 'section':
-            lineset = create_bbox_lineset(node['bounds'], hierarchy_colors['section'])
-            section_boxes.append(lineset)
-            center = node['bounds']['center']
-            object_centers[node['id']] = np.array([center['x'], center['y'], center.get('z', 1.5)])
+        # Find highest shelf in this zone
+        shelves = zone.get('shelves', {})
+        if isinstance(shelves, dict):
+            for shelf in shelves.values():
+                shelf_max_z = shelf['bounds']['max'].get('z', min_z)
+                max_z = max(max_z, shelf_max_z)
+
+        # Create zone box with computed Z bounds
+        zone_bounds = {
+            'min': {
+                'x': zone['bounds']['min']['x'],
+                'y': zone['bounds']['min']['y'],
+                'z': min_z
+            },
+            'max': {
+                'x': zone['bounds']['max']['x'],
+                'y': zone['bounds']['max']['y'],
+                'z': max_z
+            }
+        }
+
+        # Color zones distinctly
+        zone_colors = {
+            'zone_storage': [0, 1, 0],      # Green
+            'zone_loading': [1, 0.5, 0],    # Orange
+            'zone_unloading': [1, 0, 1],    # Magenta
+            'zone_office': [0, 1, 1],       # Cyan
+        }
+        zone_color = zone_colors.get(zone['id'], [0.5, 0.5, 0.5])
+
+        zone_lineset = create_bbox_lineset(zone_bounds, zone_color)
+        zone_boxes.append(zone_lineset)
 
     print(f"  Created {len(zone_boxes)} zone boxes")
-    print(f"  Created {len(aisle_boxes)} aisle boxes")
-    print(f"  Created {len(shelf_boxes)} shelf boxes")
-    print(f"  Created {len(section_boxes)} section boxes")
 
-    # 3. Hierarchy edges (parent → child)
-    hierarchy_edges = []
-    for edge in tiergraph['edges']:
-        source_id = edge['source']
-        target_id = edge['target']
+    # 3. Create shelf and section boxes (only for storage zone)
+    shelf_boxes = []
+    for zone in warehouse_layout['functional_zones']:
+        if zone['id'] == 'zone_storage':  # Only show storage zone shelves
+            shelves = zone.get('shelves', {})
+            if isinstance(shelves, dict):
+                for shelf_id, shelf in shelves.items():
+                    lineset = create_bbox_lineset(shelf['bounds'], [0, 0, 1])
+                    shelf_boxes.append(lineset)
 
-        if source_id in object_centers and target_id in object_centers:
-            source_pt = object_centers[source_id]
-            target_pt = object_centers[target_id]
+                    # Create section boxes
+                    sections = shelf.get('sections', {})
+                    if isinstance(sections, dict):
+                        for level_dict in sections.values():
+                            if isinstance(level_dict, dict):
+                                for section in level_dict.values():
+                                    if isinstance(section, dict) and 'bounds' in section:
+                                        sec_lineset = create_bbox_lineset(
+                                            section['bounds'], [1, 1, 0]
+                                        )
+                                        shelf_boxes.append(sec_lineset)
 
-            # Use green color for containment edges
-            edge_geom = create_hierarchy_edge(source_pt, target_pt, color=[0.0, 0.8, 0.0], radius=0.02)
-            hierarchy_edges.extend(edge_geom)
+    print(f"  Created {len(shelf_boxes)} shelf/section boxes")
 
-    print(f"  Created {len(hierarchy_edges)} hierarchy edges")
+    # 4. Create object bounding boxes
+    object_boxes = []
+    for i, pcd in enumerate(pcds):
+        if len(pcd.points) > 0:
+            # Compute axis-aligned bounding box from point cloud
+            points = np.asarray(pcd.points)
+            min_pt = points.min(axis=0)
+            max_pt = points.max(axis=0)
+
+            # Create bounds dict
+            obj_bounds = {
+                'min': {'x': min_pt[0], 'y': min_pt[1], 'z': min_pt[2]},
+                'max': {'x': max_pt[0], 'y': max_pt[1], 'z': max_pt[2]}
+            }
+
+            # Create white wireframe for object boundary
+            obj_lineset = create_bbox_lineset(obj_bounds, color=[1, 1, 1])
+            object_boxes.append(obj_lineset)
+
+    print(f"  Created {len(object_boxes)} object bounding boxes")
 
     # Initialize visualizer
     print("\nInitializing Open3D visualizer...")
     vis = o3d.visualization.VisualizerWithKeyCallback()
-    vis.create_window(window_name='TierGraph Visualization', width=1920, height=1080)
+    vis.create_window(window_name="TierGraph (Isaac Sim Global Frame)", width=1920, height=1080)
 
-    # Add all geometries
-    for pcd in pcds:
-        vis.add_geometry(pcd)
-
-    # Add infrastructure (initially hidden except zones)
+    # Add geometries
+    vis.add_geometry(floor_mesh)
     for box in zone_boxes:
-        vis.add_geometry(box)
-    for box in aisle_boxes:
         vis.add_geometry(box)
     for box in shelf_boxes:
         vis.add_geometry(box)
-    # Sections are too many, keep hidden initially
+    for box in object_boxes:
+        vis.add_geometry(box)
+    for pcd in pcds:
+        vis.add_geometry(pcd)
 
-    # Store visibility state
-    class State:
-        show_zones = True
-        show_aisles = True
-        show_shelves = True
-        show_sections = False
-        show_edges = False
-        color_mode = 'instance'  # 'instance', 'hierarchy', 'rgb'
+    # Color by instance
+    for i, pcd in enumerate(pcds):
+        pcd.paint_uniform_color(instance_colors[i])
 
-    state = State()
+    # Add coordinate frame
+    coord_frame = o3d.geometry.TriangleMesh.create_coordinate_frame(size=2.0, origin=[0, 0, 0])
+    vis.add_geometry(coord_frame)
 
-    # Callback functions
-    def toggle_zones(vis):
-        state.show_zones = not state.show_zones
-        for box in zone_boxes:
-            if state.show_zones:
-                vis.add_geometry(box, reset_bounding_box=False)
-            else:
-                vis.remove_geometry(box, reset_bounding_box=False)
-        print(f"Zones: {'ON' if state.show_zones else 'OFF'}")
-
-    def toggle_aisles(vis):
-        state.show_aisles = not state.show_aisles
-        for box in aisle_boxes:
-            if state.show_aisles:
-                vis.add_geometry(box, reset_bounding_box=False)
-            else:
-                vis.remove_geometry(box, reset_bounding_box=False)
-        print(f"Aisles: {'ON' if state.show_aisles else 'OFF'}")
-
-    def toggle_shelves(vis):
-        state.show_shelves = not state.show_shelves
-        for box in shelf_boxes:
-            if state.show_shelves:
-                vis.add_geometry(box, reset_bounding_box=False)
-            else:
-                vis.remove_geometry(box, reset_bounding_box=False)
-        print(f"Shelves: {'ON' if state.show_shelves else 'OFF'}")
-
-    def toggle_sections(vis):
-        state.show_sections = not state.show_sections
-        if state.show_sections:
-            for box in section_boxes:
-                vis.add_geometry(box, reset_bounding_box=False)
-        else:
-            for box in section_boxes:
-                vis.remove_geometry(box, reset_bounding_box=False)
-        print(f"Sections: {'ON' if state.show_sections else 'OFF'}")
-
-    def toggle_edges(vis):
-        state.show_edges = not state.show_edges
-        if state.show_edges:
-            for edge in hierarchy_edges:
-                vis.add_geometry(edge, reset_bounding_box=False)
-        else:
-            for edge in hierarchy_edges:
-                vis.remove_geometry(edge, reset_bounding_box=False)
-        print(f"Hierarchy edges: {'ON' if state.show_edges else 'OFF'}")
-
-    def color_by_hierarchy(vis):
-        """Color objects by their hierarchy level."""
-        state.color_mode = 'hierarchy'
-        for i, obj in enumerate(objects):
-            node_id = f"object_{i}"
-            node = nodes_by_id.get(node_id)
-            if node:
-                color = hierarchy_colors.get(node['type'], [0.5, 0.5, 0.5])
-            else:
-                color = [0.5, 0.5, 0.5]
-
-            pcd = pcds[i]
-            pcd.colors = o3d.utility.Vector3dVector(np.tile(color, (len(pcd.points), 1)))
-            vis.update_geometry(pcd)
-        print("Colored by hierarchy level")
-
-    def color_by_instance(vis):
-        """Color objects by instance (random colors)."""
-        state.color_mode = 'instance'
-        for i, obj in enumerate(objects):
-            color = instance_colors[i]
-            pcd = pcds[i]
-            pcd.colors = o3d.utility.Vector3dVector(np.tile(color, (len(pcd.points), 1)))
-            vis.update_geometry(pcd)
-        print("Colored by instance")
-
-    def color_by_rgb(vis):
-        """Restore original RGB colors."""
-        state.color_mode = 'rgb'
-        for i, obj in enumerate(objects):
-            pcd = pcds[i]
-            # Original colors should be stored in obj['pcd']
-            original_colors = np.asarray(obj['pcd'].colors)
-            pcd.colors = o3d.utility.Vector3dVector(original_colors)
-            vis.update_geometry(pcd)
-        print("Colored by RGB (original)")
-
-    # Register callbacks
-    vis.register_key_callback(ord("1"), toggle_zones)
-    vis.register_key_callback(ord("2"), toggle_aisles)
-    vis.register_key_callback(ord("3"), toggle_shelves)
-    vis.register_key_callback(ord("4"), toggle_sections)
-    vis.register_key_callback(ord("5"), toggle_edges)
-    vis.register_key_callback(ord("6"), color_by_hierarchy)
-    vis.register_key_callback(ord("I"), color_by_instance)
-    vis.register_key_callback(ord("R"), color_by_rgb)
-
-    # Initial coloring
-    color_by_instance(vis)
-
+    print("Colored by instance")
     print("\n" + "="*60)
-    print("KEYBOARD CONTROLS")
+    print("VISUALIZATION READY")
     print("="*60)
-    print("  [1] Toggle zone bounding boxes")
-    print("  [2] Toggle aisle bounding boxes")
-    print("  [3] Toggle shelf bounding boxes")
-    print("  [4] Toggle section bounding boxes")
-    print("  [5] Toggle hierarchy edges")
-    print("  [6] Color by hierarchy level")
-    print("  [I] Color by instance (random colors)")
-    print("  [R] Color by RGB (original colors)")
-    print("  [Q] Exit")
+    print("Close window when done (press Q or close button)")
     print("="*60 + "\n")
 
-    # Run visualizer
     vis.run()
     vis.destroy_window()
 
