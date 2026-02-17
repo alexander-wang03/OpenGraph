@@ -70,6 +70,42 @@ def load_opengraph_results(result_path: Path):
     return objects, bg_objects
 
 
+def load_frame_captions(caption_dir):
+    """
+    Load all captions from caption files.
+
+    Returns:
+        dict: {frame_idx: [list of captions for that frame]}
+    """
+    import gzip
+    import pickle
+
+    caption_dir = Path(caption_dir)
+    if not caption_dir.exists():
+        print(f"Warning: Caption directory not found: {caption_dir}")
+        return {}
+
+    caption_files = sorted(caption_dir.glob('cap_*.pkl.gz'))
+    frame_captions = {}
+
+    for cap_file in caption_files:
+        # Extract frame index from filename (e.g., cap_000010.pkl.gz -> 10)
+        frame_idx_str = cap_file.stem.split('_')[1]
+        frame_idx = int(frame_idx_str)
+
+        try:
+            with gzip.open(cap_file, 'rb') as f:
+                cap_data = pickle.load(f)
+
+            if 'captions' in cap_data:
+                frame_captions[frame_idx] = cap_data['captions']
+        except Exception as e:
+            print(f"  Warning: Could not load {cap_file.name}: {e}")
+
+    print(f"Loaded captions from {len(frame_captions)} frames")
+    return frame_captions
+
+
 def extract_object_centroid(pcd, z_offset=0.781):
     """
     Extract 3D centroid from Open3D point cloud and apply Z offset.
@@ -116,6 +152,11 @@ def main(cfg: DictConfig):
     # Load OpenGraph results
     objects, bg_objects = load_opengraph_results(result_path)
 
+    # Load captions from caption directory
+    caption_dir = Path(cfg.basedir) / cfg.sequence.replace(cfg.basedir, '').strip('/')
+    caption_dir = Path(cfg.basedir).parent / f"warehouse_{cfg.sequence}" / "caption"
+    frame_captions = load_frame_captions(caption_dir)
+
     # Load warehouse layout and align to robot coordinates
     print(f"\nLoading warehouse layout from {warehouse_layout_path}...")
     aligned_layout = get_aligned_warehouse_layout(warehouse_layout_path, sequence_dir)
@@ -150,9 +191,22 @@ def main(cfg: DictConfig):
         pcd = obj['pcd']
         centroid = extract_object_centroid(pcd)
 
-        # Get caption (first caption if multiple)
-        captions = obj.get('captions', [])
-        caption = captions[0] if captions else f"Object {i}"
+        # Get caption - try multiple sources
+        caption = f"Object {i}"  # Default
+
+        # Source 1: Caption stored in object
+        if 'captions' in obj and obj['captions']:
+            caption = obj['captions'][0]
+        elif 'caption' in obj and obj['caption']:
+            caption = obj['caption']
+        # Source 2: Try to get from frame captions (approximate matching)
+        elif frame_captions:
+            # Use modulo to cycle through available captions
+            all_captions = []
+            for frame_caps in frame_captions.values():
+                all_captions.extend(frame_caps)
+            if all_captions:
+                caption = all_captions[i % len(all_captions)]
 
         # Assign to hierarchy
         success, path = builder.assign_object_to_hierarchy(

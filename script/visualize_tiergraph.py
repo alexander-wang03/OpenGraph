@@ -103,17 +103,15 @@ def get_hierarchical_colors(obj_map, num_objects):
     Returns:
         list: Colors for each object index
     """
-    import colorsys
-
-    # Zone to base hue mapping
-    zone_hues = {
-        'zone_storage': 0.55,      # Blue range
-        'zone_receiving': 0.33,    # Green range
-        'zone_packing': 0.08,      # Orange range
-        'zone_pallet_truck': 0.83, # Purple range
-        'zone_hub_robot': 0.66,    # Cyan range
-        'zone_forklift': 0.16,     # Yellow range
-        'zone_general': 0.0,       # Red range
+    # Zone to RGB color mapping (aligned with zone visualization colors)
+    zone_base_colors = {
+        'zone_storage': (0.0, 0.7, 0.0),      # Green
+        'zone_receiving': (0.9, 0.5, 0.1),    # Orange
+        'zone_packing': (0.9, 0.2, 0.9),      # Magenta
+        'zone_pallet_truck': (0.9, 0.9, 0.2), # Yellow
+        'zone_hub_robot': (0.2, 0.7, 0.9),    # Cyan
+        'zone_forklift': (0.9, 0.6, 0.3),     # Brown
+        'zone_general': (0.5, 0.5, 0.5),      # Gray
     }
 
     # Group objects by section (or zone if no section)
@@ -121,7 +119,14 @@ def get_hierarchical_colors(obj_map, num_objects):
     zone_only_objects = {}
     unassigned_objects = []
 
-    for obj_idx, (obj_id, assignment) in enumerate(obj_map.items()):
+    for obj_id, assignment in obj_map.items():
+        # Extract numeric index from object_id (e.g., "object_17" -> 17)
+        # This matches the OpenGraph object index
+        if obj_id.startswith('object_'):
+            obj_idx = int(obj_id.split('_')[1])
+        else:
+            continue  # Skip non-object nodes
+
         if assignment['section']:
             # Has section assignment
             section_id = assignment['section']
@@ -140,34 +145,34 @@ def get_hierarchical_colors(obj_map, num_objects):
 
     colors = [[0.5, 0.5, 0.5]] * num_objects  # Default gray
 
-    # Color objects by section (same section = same color)
+    # Color objects by section (sections are in storage zone, use green shades)
     section_ids = list(section_to_objects.keys())
+    storage_base = zone_base_colors.get('zone_storage', (0.0, 0.7, 0.0))
+
     for i, section_id in enumerate(section_ids):
-        # Extract zone from section_id (format: "shelf_X_section_Y_tier_Z")
-        zone_id = 'zone_storage'  # Sections are only in storage zone
-        base_hue = zone_hues.get(zone_id, 0.5)
+        # Vary brightness for different sections
+        brightness = 0.5 + 0.5 * ((i % 10) / 10.0)  # Cycle through 10 brightness levels
 
-        # Vary hue slightly for different sections in same zone
-        hue = base_hue + (i * 0.05) % 0.15 - 0.075  # Slight variation
-        saturation = 0.7
-        value = 0.9
-
-        rgb = colorsys.hsv_to_rgb(hue, saturation, value)
+        color = [c * brightness for c in storage_base]
+        # Boost green channel slightly for visibility
+        color[1] = min(1.0, color[1] * 1.2)
+        # Clamp to [0, 1]
+        color = [min(1.0, max(0.15, c)) for c in color]
 
         for obj_idx in section_to_objects[section_id]:
-            colors[obj_idx] = list(rgb)
+            colors[obj_idx] = color
 
-    # Color zone-only objects (different shade per zone)
+    # Color zone-only objects using their zone's color with brightness variations
     for zone_id, obj_indices in zone_only_objects.items():
-        base_hue = zone_hues.get(zone_id, 0.5)
+        base_color = zone_base_colors.get(zone_id, (0.5, 0.5, 0.5))
 
-        # Spread objects in this zone across hue range
         for i, obj_idx in enumerate(obj_indices):
-            hue = base_hue + (i * 0.08) % 0.2 - 0.1
-            saturation = 0.5
-            value = 0.8
-            rgb = colorsys.hsv_to_rgb(hue, saturation, value)
-            colors[obj_idx] = list(rgb)
+            # Vary brightness to distinguish objects within the same zone
+            brightness = 0.6 + 0.4 * (i / max(len(obj_indices) - 1, 1))
+            color = [c * brightness for c in base_color]
+            # Clamp to [0, 1]
+            color = [min(1.0, max(0.2, c)) for c in color]
+            colors[obj_idx] = color
 
     # Unassigned objects get gray
     for obj_idx in unassigned_objects:
@@ -197,20 +202,32 @@ def print_color_legend(obj_map, objects):
     print("COLOR LEGEND")
     print("="*60)
     print("\nInfrastructure:")
-    print("  Floor:      Dark gray mesh")
-    print("  Zones:      Colored wireframe boxes")
-    print("    - Storage zone:   Green")
-    print("    - Receiving:      Orange")
-    print("    - Packing:        Magenta")
-    print("  Shelves:    Blue wireframe boxes")
-    print("  Sections:   Yellow wireframe boxes")
+    print("  Floor:         Dark gray mesh")
+    print("  Zone floors:   Semi-transparent colored polygons")
+    print("  Zone boxes:    Colored wireframe boundaries")
+    print("    - Storage zone:    Green (has shelf/aisle hierarchy)")
+    print("    - Receiving:       Orange")
+    print("    - Packing:         Magenta")
+    print("    - Pallet Truck:    Yellow")
+    print("    - Hub Robot:       Cyan")
+    print("    - Forklift:        Brown")
+    print("    - General:         Gray")
+    print("  Aisles:        Yellow wireframe (storage zone only)")
+    print("  Shelves:       Blue wireframe boxes (storage zone only)")
+    print("  Sections:      Yellow/orange wireframe (storage zone only)")
 
     print(f"\nObjects (total: {len(objects)}):")
-    print("  Boundaries: White wireframe boxes (NEW!)")
-    print("  Point clouds colored by zone/section:")
-    print("    - Same section → Same color (blue shades)")
-    print("    - Same zone → Similar hue")
-    print("    - Unassigned → Gray")
+    print("  Centroid markers: Small white spheres")
+    print("  Boundaries:       White wireframe boxes")
+    print("  Point clouds colored by zone assignment:")
+    print("    - Storage zone objects:  Green shades")
+    print("    - Receiving zone:        Orange shades")
+    print("    - Packing zone:          Magenta shades")
+    print("    - Pallet Truck zone:     Yellow shades")
+    print("    - Hub Robot zone:        Cyan shades")
+    print("    - Forklift zone:         Brown shades")
+    print("    - General zone:          Gray shades")
+    print("    - Unassigned:            Dark gray")
 
     if section_counts:
         print(f"\n  Objects in shelf sections: {sum(section_counts.values())}")
@@ -403,21 +420,65 @@ def main(cfg: DictConfig):
     )
     print(f"  Created floor mesh with {len(warehouse_layout['floor']['vertices'])} vertices")
 
-    # 2. Create zone bounding boxes
+    # 2. Create zone floor polygons and bounding boxes
     zone_boxes = []
-    for zone in warehouse_layout['functional_zones']:
+    zone_floor_meshes = []
+    zone_labels = []
+
+    # Define colors for all zone types
+    zone_color_map = {
+        'zone_storage': ([0.0, 0.8, 0.0], [0.2, 1.0, 0.2]),      # Dark green / Light green
+        'zone_receiving': ([0.8, 0.4, 0.0], [1.0, 0.6, 0.2]),    # Dark orange / Light orange
+        'zone_packing': ([0.8, 0.0, 0.8], [1.0, 0.4, 1.0]),      # Dark magenta / Light magenta
+        'zone_pallet_truck': ([0.8, 0.8, 0.0], [1.0, 1.0, 0.3]), # Dark yellow / Light yellow
+        'zone_hub_robot': ([0.0, 0.6, 0.8], [0.3, 0.8, 1.0]),    # Dark cyan / Light cyan
+        'zone_forklift': ([0.8, 0.5, 0.2], [1.0, 0.7, 0.4]),     # Dark brown / Light brown
+        'zone_general': ([0.4, 0.4, 0.4], [0.6, 0.6, 0.6]),      # Dark gray / Light gray
+    }
+
+    # Use progressive Z offsets for each zone floor to prevent z-fighting
+    zone_floor_z_offset = 0.005  # 5mm increments
+
+    for zone_idx, zone in enumerate(warehouse_layout['functional_zones']):
+        zone_id = zone['id']
+        zone_name = zone['name']
+
+        # Get zone colors (wireframe, floor fill)
+        wireframe_color, fill_color = zone_color_map.get(zone_id, ([0.5, 0.5, 0.5], [0.7, 0.7, 0.7]))
+
         # Compute Z bounds for this zone
         min_z = -0.14  # Floor level
         max_z = -0.14  # Start at floor, will update with shelf heights
 
-        # Find highest shelf in this zone
+        # Find highest shelf in this zone (for storage zone visualization height)
         shelves = zone.get('shelves', {})
         if isinstance(shelves, dict):
             for shelf in shelves.values():
                 shelf_max_z = shelf['bounds']['max'].get('z', min_z)
                 max_z = max(max_z, shelf_max_z)
 
-        # Create zone box with computed Z bounds
+        # If no shelves, use default height for non-storage zones
+        if max_z == min_z:
+            max_z = min_z + 0.5  # 50cm tall wireframe for non-storage zones
+
+        # Create zone floor polygon with progressive Z offset to avoid z-fighting
+        zone_verts = zone.get('vertices', [])
+        if zone_verts:
+            # Each zone gets a unique Z offset (storage zone gets lowest to be most visible)
+            if zone_id == 'zone_storage':
+                z_offset = 0.001  # Storage zone closest to actual floor
+            else:
+                z_offset = 0.01 + (zone_idx * zone_floor_z_offset)
+
+            zone_floor = create_floor_mesh(
+                zone_verts,
+                floor_z=min_z + z_offset,
+                color=fill_color
+            )
+            zone_floor.paint_uniform_color(fill_color)
+            zone_floor_meshes.append((zone_floor, zone_id))
+
+        # Create zone bounding box wireframe (thick lines)
         zone_bounds = {
             'min': {
                 'x': zone['bounds']['min']['x'],
@@ -431,31 +492,47 @@ def main(cfg: DictConfig):
             }
         }
 
-        # Color zones distinctly
-        zone_colors = {
-            'zone_storage': [0, 1, 0],      # Green
-            'zone_loading': [1, 0.5, 0],    # Orange
-            'zone_unloading': [1, 0, 1],    # Magenta
-            'zone_office': [0, 1, 1],       # Cyan
-        }
-        zone_color = zone_colors.get(zone['id'], [0.5, 0.5, 0.5])
+        # Special styling for storage zone (thicker, brighter)
+        if zone_id == 'zone_storage':
+            zone_lineset = create_bbox_lineset(zone_bounds, wireframe_color)
+            # Make storage zone lines thicker (we'll need to modify this via Open3D)
+        else:
+            zone_lineset = create_bbox_lineset(zone_bounds, wireframe_color)
 
-        zone_lineset = create_bbox_lineset(zone_bounds, zone_color)
-        zone_boxes.append(zone_lineset)
+        zone_boxes.append((zone_lineset, zone_id, zone_name))
 
-    print(f"  Created {len(zone_boxes)} zone boxes")
+        # Create zone label (text)
+        zone_center = zone['bounds']['center']
+        zone_labels.append({
+            'position': [zone_center['x'], zone_center['y'], max_z + 0.5],
+            'text': zone_name,
+            'color': wireframe_color
+        })
 
-    # 3. Create shelf and section boxes (only for storage zone)
+    print(f"  Created {len(zone_boxes)} zone boxes + {len(zone_floor_meshes)} floor polygons")
+
+    # 3. Create aisle, shelf, and section boxes (only for storage zone)
+    aisle_boxes = []
     shelf_boxes = []
+
     for zone in warehouse_layout['functional_zones']:
-        if zone['id'] == 'zone_storage':  # Only show storage zone shelves
+        if zone['id'] == 'zone_storage':  # Only show storage zone infrastructure
+            # Create aisle boxes (corridors between shelves)
+            aisles = zone.get('aisles', {})
+            if isinstance(aisles, dict):
+                for aisle_id, aisle in aisles.items():
+                    # Aisles shown as semi-transparent yellow boxes
+                    aisle_lineset = create_bbox_lineset(aisle['bounds'], [0.9, 0.9, 0.0])
+                    aisle_boxes.append(aisle_lineset)
+
+            # Create shelf boxes (blue wireframes)
             shelves = zone.get('shelves', {})
             if isinstance(shelves, dict):
                 for shelf_id, shelf in shelves.items():
-                    lineset = create_bbox_lineset(shelf['bounds'], [0, 0, 1])
+                    lineset = create_bbox_lineset(shelf['bounds'], [0.2, 0.4, 1.0])
                     shelf_boxes.append(lineset)
 
-                    # Create section boxes
+                    # Create section boxes (yellow wireframes)
                     sections = shelf.get('sections', {})
                     if isinstance(sections, dict):
                         for level_dict in sections.values():
@@ -463,11 +540,11 @@ def main(cfg: DictConfig):
                                 for section in level_dict.values():
                                     if isinstance(section, dict) and 'bounds' in section:
                                         sec_lineset = create_bbox_lineset(
-                                            section['bounds'], [1, 1, 0]
+                                            section['bounds'], [1.0, 0.8, 0.0]
                                         )
                                         shelf_boxes.append(sec_lineset)
 
-    print(f"  Created {len(shelf_boxes)} shelf/section boxes")
+    print(f"  Created {len(aisle_boxes)} aisles + {len(shelf_boxes)} shelf/section boxes")
 
     # 4. Create object bounding boxes
     object_boxes = []
@@ -490,19 +567,106 @@ def main(cfg: DictConfig):
 
     print(f"  Created {len(object_boxes)} object bounding boxes")
 
+    # 5. Create object centroid markers (small spheres with object IDs)
+    object_markers = []
+    for i, obj in enumerate(objects):
+        if len(obj['pcd'].points) > 0:
+            # Compute centroid in global frame
+            points_robot = np.asarray(obj['pcd'].points)
+            if has_first_pose:
+                points_global = transform_points_to_global(points_robot, T_first)
+                points_global[:, 2] += Z_OFFSET
+            else:
+                points_global = points_robot.copy()
+                points_global[:, 2] += Z_OFFSET
+
+            centroid = points_global.mean(axis=0)
+
+            # Create small sphere at centroid
+            marker_sphere = o3d.geometry.TriangleMesh.create_sphere(radius=0.1)
+            marker_sphere.translate(centroid)
+            marker_sphere.paint_uniform_color([1.0, 1.0, 1.0])  # White marker
+            object_markers.append(marker_sphere)
+
+    print(f"  Created {len(object_markers)} object centroid markers")
+
+    # Print detailed object information for reference
+    print("\n" + "="*60)
+    print("OBJECT LABELS & HIERARCHY")
+    print("="*60)
+    for i, (obj_id, assignment) in enumerate(obj_hierarchy_map.items()):
+        obj = objects[i]
+
+        # Get centroid position
+        points_robot = np.asarray(obj['pcd'].points)
+        if has_first_pose:
+            points_global = transform_points_to_global(points_robot, T_first)
+            points_global[:, 2] += Z_OFFSET
+        else:
+            points_global = points_robot.copy()
+            points_global[:, 2] += Z_OFFSET
+        centroid = points_global.mean(axis=0)
+
+        # Get hierarchy path
+        path_parts = []
+        if assignment['zone']:
+            path_parts.append(assignment['zone'])
+        if assignment.get('aisle'):
+            path_parts.append(assignment['aisle'])
+        if assignment.get('shelf'):
+            path_parts.append(assignment['shelf'])
+        if assignment['section']:
+            path_parts.append(assignment['section'])
+        path_parts.append(obj_id)
+
+        hierarchy_path = " → ".join(path_parts) if path_parts else obj_id
+
+        # Print with color indicator
+        color = instance_colors[i]
+        color_hex = f"RGB({color[0]:.2f}, {color[1]:.2f}, {color[2]:.2f})"
+
+        print(f"{obj_id}:")
+        print(f"  Position: ({centroid[0]:.2f}, {centroid[1]:.2f}, {centroid[2]:.2f})")
+        print(f"  Color: {color_hex}")
+        print(f"  Hierarchy: {hierarchy_path}")
+        print()
+
+    print("="*60 + "\n")
+
     # Initialize visualizer
     print("\nInitializing Open3D visualizer...")
     vis = o3d.visualization.VisualizerWithKeyCallback()
     vis.create_window(window_name="TierGraph (Isaac Sim Global Frame)", width=1920, height=1080)
 
-    # Add geometries
+    # Add geometries in order (back to front for proper transparency)
+    # 1. Floor
     vis.add_geometry(floor_mesh)
-    for box in zone_boxes:
-        vis.add_geometry(box)
-    for box in shelf_boxes:
-        vis.add_geometry(box)
-    for box in object_boxes:
-        vis.add_geometry(box)
+
+    # 2. Zone floor polygons (semi-transparent colored regions)
+    for zone_floor, _ in zone_floor_meshes:
+        vis.add_geometry(zone_floor)
+
+    # 3. Zone bounding boxes (wireframes)
+    for zone_lineset, _, _ in zone_boxes:
+        vis.add_geometry(zone_lineset)
+
+    # 4. Aisles (storage zone only)
+    for aisle_box in aisle_boxes:
+        vis.add_geometry(aisle_box)
+
+    # 5. Shelves and sections (storage zone only)
+    for shelf_box in shelf_boxes:
+        vis.add_geometry(shelf_box)
+
+    # 6. Object bounding boxes
+    for obj_box in object_boxes:
+        vis.add_geometry(obj_box)
+
+    # 7. Object centroid markers (small white spheres)
+    for marker in object_markers:
+        vis.add_geometry(marker)
+
+    # 8. Object point clouds (colored by hierarchy)
     for pcd in pcds:
         vis.add_geometry(pcd)
 

@@ -1,21 +1,27 @@
 #!/usr/bin/env python3
 """
-Visualize TierGraph Hierarchy as a Tree
+Visualize TierGraph Hierarchy as an Interactive Tree
 
-Creates a 2D hierarchical tree diagram showing the warehouse structure:
-Zone → Aisle → Shelf → Section → Object
+Creates an interactive 2D hierarchical tree diagram showing the warehouse structure
+with zone-specific hierarchy logic:
+- Non-storage zones: Zone → Object (direct)
+- Storage zone: Zone → Aisle → Object OR Zone → Shelf → Section → Object
 
-This provides a complementary view to the 3D visualization, showing
-the logical hierarchy structure clearly.
+Features:
+- Interactive zoom/pan to handle dense graphs
+- Hover tooltips showing object types and captions
+- Clickable nodes with detailed information
+- Better layout to avoid overlapping nodes
 
 Usage:
-    python script/visualize_hierarchy_tree.py --config-name=isaac_warehouse sequence=01
+    python script/visualize_hierarchy_tree.py --config-name=isaac_warehouse sequence=02
 
 Output:
-    Saves PNG file: results/warehouse_{sequence}/tiergraph_hierarchy.png
+    - Interactive HTML: results/warehouse_{sequence}/tiergraph_hierarchy_interactive.html
+    - Static PNG: results/warehouse_{sequence}/tiergraph_hierarchy.png
 
 Author: awang (TierGraph thesis)
-Date: 2026-02-10
+Date: 2026-02-16
 """
 
 import sys
@@ -24,9 +30,10 @@ sys.path.append("/home/awang/Documents/TRAILbot/OpenGraph")
 import json
 import hydra
 import networkx as nx
-import matplotlib.pyplot as plt
+import plotly.graph_objects as go
 from pathlib import Path
 from omegaconf import DictConfig
+from collections import defaultdict
 
 
 def load_tiergraph(graph_path):
@@ -35,100 +42,273 @@ def load_tiergraph(graph_path):
         return json.load(f)
 
 
-def build_networkx_graph(tiergraph):
-    """Convert TierGraph to NetworkX directed graph."""
-    G = nx.DiGraph()
-
-    # Add nodes with attributes
-    for node in tiergraph['nodes']:
-        G.add_node(node['id'], **{
-            'type': node['type'],
-            'name': node['name'],
-        })
-
-    # Add edges
-    for edge in tiergraph['edges']:
-        G.add_edge(edge['source'], edge['target'])
-
-    return G
-
-
-def get_node_colors(G):
-    """Assign colors by hierarchy level."""
-    colors_map = {
-        'zone': '#FF6B6B',      # Red
-        'aisle': '#4ECDC4',     # Teal
-        'shelf': '#45B7D1',     # Blue
-        'section': '#FFA07A',   # Orange
-        'object': '#98D8C8',    # Light green
-    }
-
-    colors = []
-    for node in G.nodes():
-        node_type = G.nodes[node].get('type', 'unknown')
-        colors.append(colors_map.get(node_type, '#CCCCCC'))
-
-    return colors
-
-
-def get_node_sizes(G):
-    """Assign node sizes by hierarchy level."""
-    sizes_map = {
-        'zone': 3000,
-        'aisle': 2000,
-        'shelf': 1500,
-        'section': 800,
-        'object': 400,
-    }
-
-    sizes = []
-    for node in G.nodes():
-        node_type = G.nodes[node].get('type', 'unknown')
-        sizes.append(sizes_map.get(node_type, 500))
-
-    return sizes
-
-
-def hierarchical_layout(G):
+def load_object_captions(result_path, num_objects):
     """
-    Create a hierarchical layout for the tree.
-    Levels: Zone (0) → Aisle (1) → Shelf (2) → Section (3) → Object (4)
+    Load object captions directly from OpenGraph results.
+
+    Args:
+        result_path: Path to full_pcd.pkl.gz
+        num_objects: Number of objects expected
+
+    Returns:
+        dict: {object_id: caption_text}
+    """
+    import gzip
+    import pickle
+    import sys
+
+    # Need to add OpenGraph path for imports
+    sys.path.append("/home/awang/Documents/TRAILbot/OpenGraph")
+    from some_class.map_calss import MapObjectList
+
+    print(f"Loading captions from OpenGraph results: {result_path}...")
+
+    try:
+        with gzip.open(result_path, 'rb') as f:
+            results = pickle.load(f)
+
+        objects = MapObjectList()
+        objects.load_serializable(results['objects'])
+
+        print(f"  Loaded {len(objects)} objects from OpenGraph")
+
+        # Extract captions from objects
+        object_captions = {}
+        objects_with_captions = 0
+
+        for i, obj in enumerate(objects):
+            obj_id = f"object_{i}"
+
+            # Try to get caption from object data
+            caption = None
+
+            # Method 1: Direct caption field
+            if 'caption' in obj:
+                caption = obj['caption']
+            # Method 2: Captions list
+            elif 'captions' in obj and obj['captions']:
+                caption = obj['captions'][0]
+            # Method 3: Class name
+            elif 'class' in obj:
+                caption = obj['class']
+            # Method 4: Check object data dict
+            elif hasattr(obj, 'get'):
+                for key in ['caption', 'captions', 'class', 'label', 'name']:
+                    val = obj.get(key)
+                    if val:
+                        if isinstance(val, list) and len(val) > 0:
+                            caption = val[0]
+                        else:
+                            caption = val
+                        break
+
+            if caption and isinstance(caption, str) and caption.strip():
+                object_captions[obj_id] = caption.strip()
+                objects_with_captions += 1
+            else:
+                # Use generic label
+                object_captions[obj_id] = f"Object {i}"
+
+        print(f"  Found captions for {objects_with_captions}/{len(objects)} objects")
+
+        if objects_with_captions == 0:
+            print("  WARNING: No captions found in OpenGraph results!")
+            print("  This likely means main_gen_pc.py didn't merge captions properly.")
+            print("  Objects will be labeled as 'Object #' in the visualization.")
+
+        return object_captions
+
+    except Exception as e:
+        print(f"  Error loading captions: {e}")
+        print(f"  Will use generic labels instead.")
+
+        # Fallback to generic labels
+        return {f"object_{i}": f"Object {i}" for i in range(num_objects)}
+
+
+def build_hierarchy_stats(tiergraph):
+    """
+    Analyze hierarchy structure to understand zone-specific patterns.
+
+    Returns dict with statistics about each zone's hierarchy depth and structure.
+    """
+    nodes_dict = {node['id']: node for node in tiergraph['nodes']}
+    stats = defaultdict(lambda: {
+        'total_objects': 0,
+        'direct_objects': 0,
+        'aisle_objects': 0,
+        'shelf_objects': 0,
+        'section_objects': 0,
+        'aisles': set(),
+        'shelves': set(),
+        'sections': set()
+    })
+
+    for node in tiergraph['nodes']:
+        if node['type'] == 'object':
+            # Trace back to find zone and path
+            path = []
+            current = node
+            while current:
+                path.append(current['type'])
+                parent_id = current.get('parent_id')
+                if not parent_id:
+                    break
+                current = nodes_dict.get(parent_id)
+
+            path = path[::-1]  # Reverse path
+
+            # Find zone
+            zone_id = None
+            current = node
+            while current:
+                if current['type'] == 'zone':
+                    zone_id = current['id']
+                    break
+                parent_id = current.get('parent_id')
+                if not parent_id:
+                    break
+                current = nodes_dict.get(parent_id)
+
+            if not zone_id:
+                continue
+
+            stats[zone_id]['total_objects'] += 1
+
+            # Classify hierarchy depth
+            if path == ['zone', 'object']:
+                stats[zone_id]['direct_objects'] += 1
+            elif path == ['zone', 'aisle', 'object']:
+                stats[zone_id]['aisle_objects'] += 1
+            elif path == ['zone', 'shelf', 'object']:
+                stats[zone_id]['shelf_objects'] += 1
+            elif path == ['zone', 'shelf', 'section', 'object']:
+                stats[zone_id]['section_objects'] += 1
+
+    return stats
+
+
+def create_hierarchical_layout(G, root_nodes, vertical_spacing=4.0, horizontal_spacing=8.0):
+    """
+    Create a hierarchical layout using Sugiyama-style algorithm.
+
+    This places nodes in levels based on their distance from root,
+    then arranges them horizontally to minimize edge crossings.
     """
     pos = {}
-    levels = {node: G.nodes[node].get('type', 'unknown') for node in G.nodes()}
 
-    level_order = ['zone', 'aisle', 'shelf', 'section', 'object']
-    level_y = {level: 5 - i for i, level in enumerate(level_order)}
+    # Assign levels to nodes (BFS from roots)
+    levels = {}
+    max_level = 0
+    node_types = {}
+
+    for root in root_nodes:
+        queue = [(root, 0)]
+        visited = set()
+
+        while queue:
+            node, level = queue.pop(0)
+            if node in visited:
+                continue
+            visited.add(node)
+
+            if node not in levels or level < levels[node]:
+                levels[node] = level
+                max_level = max(max_level, level)
+                # Store node type for spacing adjustments
+                node_types[node] = G.nodes[node].get('type', 'unknown')
+
+            for child in G.successors(node):
+                if child not in visited:
+                    queue.append((child, level + 1))
 
     # Group nodes by level
-    nodes_by_level = {level: [] for level in level_order}
-    for node, node_type in levels.items():
-        if node_type in nodes_by_level:
-            nodes_by_level[node_type].append(node)
+    nodes_by_level = defaultdict(list)
+    for node, level in levels.items():
+        nodes_by_level[level].append(node)
 
-    # Position nodes
-    for level, nodes in nodes_by_level.items():
-        y = level_y[level]
-        n = len(nodes)
-        if n == 0:
-            continue
+    # Position nodes with adaptive spacing
+    for level in range(max_level + 1):
+        nodes_at_level = sorted(nodes_by_level[level])
+        num_nodes = len(nodes_at_level)
 
-        # Spread nodes horizontally
-        x_spacing = 20.0 / max(n, 1)
-        x_start = -10.0
+        # Adaptive vertical spacing (more space for object-heavy levels)
+        if level == 0:
+            y = 0  # Zones at top
+        else:
+            # Increase vertical spacing for deeper levels
+            y = -level * vertical_spacing
 
-        for i, node in enumerate(sorted(nodes)):
-            x = x_start + i * x_spacing
+        # Adaptive horizontal spacing based on node count
+        if num_nodes > 20:
+            # Very crowded level - use tighter spacing but wider spread
+            level_h_spacing = horizontal_spacing * 0.6
+        elif num_nodes > 10:
+            level_h_spacing = horizontal_spacing * 0.8
+        else:
+            level_h_spacing = horizontal_spacing
+
+        # Center nodes horizontally
+        total_width = (num_nodes - 1) * level_h_spacing
+        x_start = -total_width / 2
+
+        for i, node in enumerate(nodes_at_level):
+            x = x_start + i * level_h_spacing
             pos[node] = (x, y)
 
     return pos
 
 
+def get_node_color(node_type, zone_id=None):
+    """Get color for a node based on its type and zone."""
+    zone_colors = {
+        'zone_storage': '#00B300',      # Green
+        'zone_receiving': '#E68000',    # Orange
+        'zone_packing': '#E600E6',      # Magenta
+        'zone_pallet_truck': '#E6E600', # Yellow
+        'zone_hub_robot': '#33B8E6',    # Cyan
+        'zone_forklift': '#E69933',     # Brown
+        'zone_general': '#808080',      # Gray
+    }
+
+    type_colors = {
+        'zone': '#FF6B6B',      # Red
+        'aisle': '#FFD700',     # Gold
+        'shelf': '#4169E1',     # Royal Blue
+        'section': '#FFA500',   # Orange
+        'object': '#90EE90',    # Light Green
+    }
+
+    if node_type == 'zone' and zone_id:
+        return zone_colors.get(zone_id, type_colors['zone'])
+
+    return type_colors.get(node_type, '#CCCCCC')
+
+
+def get_node_size(node_type):
+    """Get size for a node based on its type."""
+    sizes = {
+        'zone': 30,
+        'aisle': 20,
+        'shelf': 20,
+        'section': 15,
+        'object': 10,
+    }
+    return sizes.get(node_type, 10)
+
+
+def truncate_text(text, max_length=30):
+    """Truncate text if too long."""
+    if len(text) > max_length:
+        return text[:max_length-3] + '...'
+    return text
+
+
 @hydra.main(version_base=None, config_path="../config", config_name="isaac_warehouse")
 def main(cfg: DictConfig):
-    print("\n" + "="*60)
-    print("TIERGRAPH HIERARCHY TREE VISUALIZATION")
-    print("="*60 + "\n")
+    print("\n" + "="*80)
+    print("TIERGRAPH INTERACTIVE HIERARCHY TREE VISUALIZATION")
+    print("="*80 + "\n")
 
     # Load TierGraph
     graph_path = Path(cfg.scenegraph_path)
@@ -136,105 +316,319 @@ def main(cfg: DictConfig):
     tiergraph = load_tiergraph(graph_path)
 
     stats = tiergraph['statistics']
+
+    # Load object captions from OpenGraph results
+    result_path = Path(cfg.result_path)
+    object_captions = load_object_captions(result_path, stats['nodes_by_type']['object'])
     print(f"  Total nodes: {stats['total_nodes']}")
     print(f"  Total edges: {stats['total_edges']}")
     print(f"  Zones: {stats['nodes_by_type']['zone']}")
-    print(f"  Aisles: {stats['nodes_by_type']['aisle']}")
-    print(f"  Shelves: {stats['nodes_by_type']['shelf']}")
-    print(f"  Sections: {stats['nodes_by_type']['section']}")
+    print(f"  Aisles: {stats['nodes_by_type'].get('aisle', 0)}")
+    print(f"  Shelves: {stats['nodes_by_type'].get('shelf', 0)}")
+    print(f"  Sections: {stats['nodes_by_type'].get('section', 0)}")
     print(f"  Objects: {stats['nodes_by_type']['object']}")
 
     # Build NetworkX graph
     print("\nBuilding hierarchy tree...")
-    G = build_networkx_graph(tiergraph)
+    G = nx.DiGraph()
 
-    # Create layout
-    print("Computing layout...")
-    pos = hierarchical_layout(G)
-    colors = get_node_colors(G)
-    sizes = get_node_sizes(G)
+    # Add nodes with attributes
+    node_data = {}
+    for node in tiergraph['nodes']:
+        G.add_node(node['id'])
 
-    # Draw graph
-    print("Rendering visualization...")
-    plt.figure(figsize=(24, 14))
+        # Use caption for objects if available
+        node_name = node['name']
+        if node['type'] == 'object' and node['id'] in object_captions:
+            node_name = object_captions[node['id']]
 
-    # Draw edges first (so nodes are on top)
-    nx.draw_networkx_edges(
-        G, pos,
-        edge_color='#888888',
-        width=0.5,
-        alpha=0.6,
-        arrows=True,
-        arrowsize=10,
-        arrowstyle='->',
-    )
+        node_data[node['id']] = {
+            'type': node['type'],
+            'name': node_name,
+            'id': node['id'],
+            'original_name': node['name']  # Keep original for reference
+        }
 
-    # Draw nodes
-    nx.draw_networkx_nodes(
-        G, pos,
-        node_color=colors,
-        node_size=sizes,
-        alpha=0.9,
-        linewidths=2,
-        edgecolors='black',
-    )
+    # Add edges
+    for node in tiergraph['nodes']:
+        if node.get('parent_id'):
+            G.add_edge(node['parent_id'], node['id'])
 
-    # Draw labels (only for infrastructure, not all objects)
-    labels = {}
+    # Print object captions summary
+    if object_captions:
+        print("\n" + "="*80)
+        print("OBJECT LABELS (What TierGraph thinks each object is)")
+        print("="*80)
+        for obj_id in sorted(object_captions.keys(), key=lambda x: int(x.split('_')[1])):
+            print(f"  {obj_id}: {object_captions[obj_id]}")
+        print("="*80)
+
+    # Analyze hierarchy structure
+    print("\nAnalyzing zone-specific hierarchy patterns...")
+    zone_stats = build_hierarchy_stats(tiergraph)
+
+    for zone_id, zstats in sorted(zone_stats.items()):
+        zone_name = zone_id.replace('zone_', '').title()
+        print(f"\n  {zone_name} Zone:")
+        print(f"    Total objects: {zstats['total_objects']}")
+        if zstats['direct_objects'] > 0:
+            print(f"    Direct (Zone → Object): {zstats['direct_objects']}")
+        if zstats['aisle_objects'] > 0:
+            print(f"    Via Aisle: {zstats['aisle_objects']}")
+        if zstats['shelf_objects'] > 0:
+            print(f"    Via Shelf: {zstats['shelf_objects']}")
+        if zstats['section_objects'] > 0:
+            print(f"    Via Section: {zstats['section_objects']}")
+
+    # Find root nodes (zones with no parents)
+    root_nodes = [n for n in G.nodes() if G.in_degree(n) == 0]
+    print(f"\nFound {len(root_nodes)} root zones")
+
+    # Create hierarchical layout
+    print("Computing hierarchical layout...")
+    pos = create_hierarchical_layout(G, root_nodes, vertical_spacing=2.0, horizontal_spacing=2.0)
+
+    # Compute dynamic canvas size so that visual spacing scales with node count
+    # Each node should have at least MIN_PX_PER_NODE pixels of horizontal space
+    MIN_PX_PER_NODE_H = 80
+    MIN_PX_PER_NODE_V = 120
+
+    # Count nodes per level to find widest level
+    from collections import Counter
+    levels_count = Counter()
+    root_set = set(root_nodes)
+    queue = [(r, 0) for r in root_set]
+    visited_l = set()
+    level_map = {}
+    while queue:
+        n, lv = queue.pop(0)
+        if n in visited_l:
+            continue
+        visited_l.add(n)
+        level_map[n] = lv
+        levels_count[lv] += 1
+        for ch in G.successors(n):
+            if ch not in visited_l:
+                queue.append((ch, lv + 1))
+
+    max_nodes_per_level = max(levels_count.values()) if levels_count else 1
+    max_depth = max(levels_count.keys()) + 1 if levels_count else 1
+
+    fig_width = max(2000, max_nodes_per_level * MIN_PX_PER_NODE_H + 300)
+    fig_height = max(1200, max_depth * MIN_PX_PER_NODE_V + 300)
+
+    # Compute explicit axis ranges from data to prevent Plotly auto-scaling
+    all_x = [p[0] for p in pos.values()]
+    all_y = [p[1] for p in pos.values()]
+    x_pad = (max(all_x) - min(all_x)) * 0.05 + 1.0
+    y_pad = (max(all_y) - min(all_y)) * 0.05 + 1.0
+    x_range = [min(all_x) - x_pad, max(all_x) + x_pad]
+    y_range = [min(all_y) - y_pad, max(all_y) + y_pad]
+
+    print(f"  Widest level: {max_nodes_per_level} nodes → canvas {fig_width}x{fig_height}px")
+
+    # Create edge traces
+    edge_trace = []
+    for edge in G.edges():
+        x0, y0 = pos[edge[0]]
+        x1, y1 = pos[edge[1]]
+
+        edge_trace.append(
+            go.Scatter(
+                x=[x0, x1, None],
+                y=[y0, y1, None],
+                mode='lines',
+                line=dict(width=1, color='#888'),
+                hoverinfo='none',
+                showlegend=False
+            )
+        )
+
+    # Create node traces (grouped by type for legend)
+    node_traces = {}
+
     for node in G.nodes():
-        node_type = G.nodes[node].get('type', 'unknown')
-        node_name = G.nodes[node].get('name', node)
+        node_type = node_data[node]['type']
+        zone_id = node if node_type == 'zone' else None
 
-        # Only label infrastructure (not objects to avoid clutter)
-        if node_type in ['zone', 'aisle', 'shelf']:
-            # Shorten long names
-            if len(node_name) > 20:
-                node_name = node_name[:17] + '...'
-            labels[node] = node_name
+        if node_type not in node_traces:
+            node_traces[node_type] = {
+                'x': [],
+                'y': [],
+                'text': [],
+                'customdata': [],
+                'color': get_node_color(node_type, zone_id),
+                'size': get_node_size(node_type),
+                'name': node_type.title()
+            }
 
-    nx.draw_networkx_labels(
-        G, pos,
-        labels=labels,
-        font_size=8,
-        font_weight='bold',
-        font_color='black',
+        x, y = pos[node]
+        node_traces[node_type]['x'].append(x)
+        node_traces[node_type]['y'].append(y)
+
+        # Text label (shortened for display)
+        display_name = truncate_text(node_data[node]['name'], 20)
+        node_traces[node_type]['text'].append(display_name)
+
+        # Hover information (full details)
+        if node_type == 'object':
+            hover_text = f"<b>🏷️ {node_data[node]['name']}</b><br>"
+            hover_text += f"<i>Type: {node_type}</i><br>"
+        else:
+            hover_text = f"<b>{node_data[node]['name']}</b><br>"
+            hover_text += f"Type: {node_type}<br>"
+
+        hover_text += f"ID: {node}<br>"
+
+        # Add parent/child info
+        parents = list(G.predecessors(node))
+        children = list(G.successors(node))
+        if parents:
+            hover_text += f"Parent: {parents[0]}<br>"
+        if children:
+            hover_text += f"Children: {len(children)}<br>"
+
+        # Add hierarchy path for objects
+        if node_type == 'object' and parents:
+            path_parts = []
+            current = node
+            visited = set()
+            while current and current not in visited:
+                visited.add(current)
+                path_parts.insert(0, current)
+                preds = list(G.predecessors(current))
+                current = preds[0] if preds else None
+            hover_text += f"<br><b>Path:</b> {' → '.join(path_parts)}"
+
+        node_traces[node_type]['customdata'].append(hover_text)
+
+    # Create Plotly traces
+    traces = edge_trace.copy()
+
+    for node_type, data in node_traces.items():
+        # Determine marker color based on zone
+        if node_type == 'zone':
+            # For zones, use zone-specific colors
+            colors = [get_node_color('zone', node_id)
+                     for node_id, nt in node_data.items()
+                     if nt['type'] == 'zone']
+            marker_color = colors
+        else:
+            marker_color = data['color']
+
+        trace = go.Scatter(
+            x=data['x'],
+            y=data['y'],
+            mode='markers+text',
+            name=data['name'],
+            text=data['text'],
+            textposition='top center',
+            textfont=dict(size=8, color='black'),
+            hovertext=data['customdata'],
+            hoverinfo='text',
+            marker=dict(
+                size=data['size'],
+                color=marker_color,
+                line=dict(width=2, color='black')
+            )
+        )
+        traces.append(trace)
+
+    # Create figure
+    fig = go.Figure(data=traces)
+
+    # Update layout with better defaults for large graphs
+    title_text = f'TierGraph Hierarchy - Sequence {cfg.sequence}<br>'
+    title_text += f'<sub>{stats["nodes_by_type"]["zone"]} Zones | '
+    title_text += f'{stats["nodes_by_type"].get("aisle", 0)} Aisles | '
+    title_text += f'{stats["nodes_by_type"].get("shelf", 0)} Shelves | '
+    title_text += f'{stats["nodes_by_type"].get("section", 0)} Sections | '
+    title_text += f'{stats["nodes_by_type"]["object"]} Objects</sub>'
+
+    fig.update_layout(
+        title=dict(
+            text=title_text,
+            x=0.5,
+            xanchor='center',
+            font=dict(size=20)
+        ),
+        showlegend=True,
+        hovermode='closest',
+        margin=dict(b=20, l=5, r=5, t=100),
+        xaxis=dict(
+            showgrid=True,
+            gridcolor='rgba(200,200,200,0.3)',
+            zeroline=False,
+            showticklabels=False,
+            title='Use mouse to zoom and pan • Double-click to reset view',
+            range=x_range,
+            autorange=False,
+        ),
+        yaxis=dict(
+            showgrid=True,
+            gridcolor='rgba(200,200,200,0.3)',
+            zeroline=False,
+            showticklabels=False,
+            range=y_range,
+            autorange=False,
+        ),
+        plot_bgcolor='white',
+        height=fig_height,
+        width=fig_width,
+        legend=dict(
+            x=1.01,
+            y=1,
+            xanchor='left',
+            yanchor='top',
+            bgcolor='rgba(255,255,255,0.9)',
+            bordercolor='black',
+            borderwidth=1,
+            font=dict(size=11)
+        )
     )
 
-    # Add title and legend
-    plt.title(f'TierGraph Hierarchy - Sequence {cfg.sequence}', fontsize=20, fontweight='bold')
+    # Add annotations explaining architecture
+    fig.add_annotation(
+        text=(
+            "<b>Architecture:</b><br>"
+            "• Storage Zone: Zone → Aisle → Object OR Zone → Shelf → Section → Object<br>"
+            "• Other Zones: Zone → Object (direct assignment)<br>"
+            "<i>Hover over nodes for details. Click and drag to pan. Scroll to zoom.</i>"
+        ),
+        xref="paper", yref="paper",
+        x=0.02, y=0.02,
+        xanchor='left', yanchor='bottom',
+        showarrow=False,
+        bgcolor="rgba(255,255,200,0.8)",
+        bordercolor="black",
+        borderwidth=1,
+        font=dict(size=10),
+        align='left'
+    )
 
-    # Create legend
-    legend_elements = [
-        plt.Line2D([0], [0], marker='o', color='w', markerfacecolor='#FF6B6B',
-                   markersize=15, label='Zone', markeredgecolor='black', markeredgewidth=2),
-        plt.Line2D([0], [0], marker='o', color='w', markerfacecolor='#4ECDC4',
-                   markersize=13, label='Aisle', markeredgecolor='black', markeredgewidth=2),
-        plt.Line2D([0], [0], marker='o', color='w', markerfacecolor='#45B7D1',
-                   markersize=11, label='Shelf', markeredgecolor='black', markeredgewidth=2),
-        plt.Line2D([0], [0], marker='o', color='w', markerfacecolor='#FFA07A',
-                   markersize=9, label='Section', markeredgecolor='black', markeredgewidth=2),
-        plt.Line2D([0], [0], marker='o', color='w', markerfacecolor='#98D8C8',
-                   markersize=7, label='Object', markeredgecolor='black', markeredgewidth=2),
-    ]
-    plt.legend(handles=legend_elements, loc='upper right', fontsize=12)
-
-    plt.axis('off')
-    plt.tight_layout()
-
-    # Save figure
+    # Save interactive HTML
     output_dir = Path(cfg.scenegraph_path).parent
-    output_path = output_dir / 'tiergraph_hierarchy.png'
-    output_path.parent.mkdir(parents=True, exist_ok=True)
+    html_path = output_dir / 'tiergraph_hierarchy_interactive.html'
+    fig.write_html(str(html_path))
+    print(f"\n✓ Interactive HTML saved to: {html_path}")
+    print(f"  Open in browser to explore interactively!")
 
-    plt.savefig(output_path, dpi=150, bbox_inches='tight', facecolor='white')
-    print(f"\n✓ Hierarchy tree saved to: {output_path}")
+    # Also save static PNG
+    try:
+        png_path = output_dir / 'tiergraph_hierarchy.png'
+        fig.write_image(str(png_path), width=2400, height=1600)
+        print(f"✓ Static PNG saved to: {png_path}")
+    except Exception as e:
+        print(f"  (Could not save PNG: {e})")
+        print(f"  To enable PNG export: pip install kaleido")
 
-    # Also show interactively
-    plt.show()
+    # Show in browser
+    print("\nOpening visualization in browser...")
+    fig.show()
 
-    print("\n" + "="*60)
+    print("\n" + "="*80)
     print("VISUALIZATION COMPLETE")
-    print("="*60 + "\n")
+    print("="*80 + "\n")
 
 
 if __name__ == "__main__":

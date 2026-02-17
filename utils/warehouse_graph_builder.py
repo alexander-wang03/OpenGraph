@@ -238,6 +238,13 @@ class WarehouseGraphBuilder:
         """
         Assign an OpenGraph object to the warehouse hierarchy.
 
+        Hierarchy logic:
+        - Non-storage zones: Zone → Object (direct assignment)
+        - Storage zone:
+          - If in shelf XY area: Zone → Shelf → Section → Object
+          - If in aisle XY area (but not shelf): Zone → Aisle → Object
+          - Otherwise: Zone → Object
+
         Args:
             object_id: Unique ID for the object
             object_position: 3D centroid position [x, y, z]
@@ -247,73 +254,99 @@ class WarehouseGraphBuilder:
         Returns:
             (success, hierarchy_path): Success flag and string describing the assignment
         """
-        # Step 1: Find containing zone
+        # Step 1: Find containing zone (uses XY coordinates only)
         zone_id = self.find_containing_zone(object_position)
         if not zone_id:
             return False, f"Object {object_id} not in any zone"
 
-        # Step 2: Find containing aisle (optional)
+        # Step 2: Check if this is the storage zone
+        # Only storage zone has shelf/aisle hierarchy
+        if zone_id != 'zone_storage':
+            # Non-storage zone: assign directly to zone
+            object_node = HierarchyNode(
+                id=object_id,
+                type='object',
+                name=object_caption if object_caption else f"Object {object_id}",
+                bounds={'center': {'x': object_position[0], 'y': object_position[1], 'z': object_position[2]}},
+                parent_id=zone_id
+            )
+            self.nodes[object_id] = object_node
+            self.nodes[zone_id].children.append(object_id)
+            self.edges.append((zone_id, object_id, 'contains'))
+
+            path = f"{zone_id} → {object_id}"
+            return True, path
+
+        # Step 3: Storage zone - check if object is in a shelf area (XY containment)
+        shelf_id = self.find_containing_shelf(object_position, None, zone_id)
+
+        if shelf_id:
+            # Object is in shelf XY area - try to find specific section (uses XYZ)
+            section_id = self.find_containing_section(object_position, shelf_id)
+
+            if section_id:
+                # Full hierarchy: Zone → Shelf → Section → Object
+                object_node = HierarchyNode(
+                    id=object_id,
+                    type='object',
+                    name=object_caption if object_caption else f"Object {object_id}",
+                    bounds={'center': {'x': object_position[0], 'y': object_position[1], 'z': object_position[2]}},
+                    parent_id=section_id
+                )
+                self.nodes[object_id] = object_node
+                self.nodes[section_id].children.append(object_id)
+                self.edges.append((section_id, object_id, 'contains'))
+
+                path = f"{zone_id} → {shelf_id} → {section_id} → {object_id}"
+                return True, path
+            else:
+                # In shelf area but no section match: Zone → Shelf → Object
+                object_node = HierarchyNode(
+                    id=object_id,
+                    type='object',
+                    name=object_caption if object_caption else f"Object {object_id}",
+                    bounds={'center': {'x': object_position[0], 'y': object_position[1], 'z': object_position[2]}},
+                    parent_id=shelf_id
+                )
+                self.nodes[object_id] = object_node
+                self.nodes[shelf_id].children.append(object_id)
+                self.edges.append((shelf_id, object_id, 'contains'))
+
+                path = f"{zone_id} → {shelf_id} → {object_id}"
+                return True, path
+
+        # Step 4: Not in shelf - check if in aisle (XY containment)
         aisle_id = self.find_containing_aisle(object_position, zone_id)
 
-        # Step 3: Find containing shelf
-        shelf_id = self.find_containing_shelf(object_position, aisle_id, zone_id)
-        if not shelf_id:
-            # Object in zone/aisle but not on shelf (e.g., on floor)
-            parent_id = aisle_id if aisle_id else zone_id
+        if aisle_id:
+            # In aisle: Zone → Aisle → Object
             object_node = HierarchyNode(
                 id=object_id,
                 type='object',
                 name=object_caption if object_caption else f"Object {object_id}",
                 bounds={'center': {'x': object_position[0], 'y': object_position[1], 'z': object_position[2]}},
-                parent_id=parent_id
+                parent_id=aisle_id
             )
             self.nodes[object_id] = object_node
-            self.nodes[parent_id].children.append(object_id)
-            self.edges.append((parent_id, object_id, 'contains'))
+            self.nodes[aisle_id].children.append(object_id)
+            self.edges.append((aisle_id, object_id, 'contains'))
 
-            path = f"{zone_id}"
-            if aisle_id:
-                path += f" → {aisle_id}"
-            path += f" → {object_id}"
+            path = f"{zone_id} → {aisle_id} → {object_id}"
             return True, path
 
-        # Step 4: Find containing section
-        section_id = self.find_containing_section(object_position, shelf_id)
-        if not section_id:
-            # Object on shelf but not in any section
-            object_node = HierarchyNode(
-                id=object_id,
-                type='object',
-                name=object_caption if object_caption else f"Object {object_id}",
-                bounds={'center': {'x': object_position[0], 'y': object_position[1], 'z': object_position[2]}},
-                parent_id=shelf_id
-            )
-            self.nodes[object_id] = object_node
-            self.nodes[shelf_id].children.append(object_id)
-            self.edges.append((shelf_id, object_id, 'contains'))
-
-            path = f"{zone_id}"
-            if aisle_id:
-                path += f" → {aisle_id}"
-            path += f" → {shelf_id} → {object_id}"
-            return True, path
-
-        # Step 5: Assign to section (full hierarchy)
+        # Step 5: In storage zone but not in shelf or aisle - assign directly to zone
         object_node = HierarchyNode(
             id=object_id,
             type='object',
             name=object_caption if object_caption else f"Object {object_id}",
             bounds={'center': {'x': object_position[0], 'y': object_position[1], 'z': object_position[2]}},
-            parent_id=section_id
+            parent_id=zone_id
         )
         self.nodes[object_id] = object_node
-        self.nodes[section_id].children.append(object_id)
-        self.edges.append((section_id, object_id, 'contains'))
+        self.nodes[zone_id].children.append(object_id)
+        self.edges.append((zone_id, object_id, 'contains'))
 
-        path = f"{zone_id}"
-        if aisle_id:
-            path += f" → {aisle_id}"
-        path += f" → {shelf_id} → {section_id} → {object_id}"
+        path = f"{zone_id} → {object_id}"
         return True, path
 
     def export_graph(self, output_path: str):
