@@ -194,25 +194,22 @@ def build_hierarchy_stats(tiergraph):
             # Classify hierarchy depth.
             #
             # Non-storage zones:
-            #   zone → object          (always direct — no aisles in these zones)
+            #   zone → object                      (always direct)
             #
             # Storage zone:
-            #   full path:   zone → aisle → shelf → section → object
-            #   shelf miss:  zone → aisle → shelf → object
-            #   aisle only:  zone → aisle → object
-            #   unmatched:   zone → object
-            #   Rare:        zone → shelf → (section →) object  (shelf with no aisle)
+            #   zone → shelf → section → object    (full path — shelf matched)
+            #   zone → shelf → object              (shelf matched, no section)
+            #   zone → aisle → object              (in aisle walkway, no shelf match)
+            #   zone → object                      (fallback — unmatched)
             if path == ['zone', 'object']:
                 stats[zone_id]['direct_objects'] += 1
             elif path == ['zone', 'aisle', 'object']:
-                # Storage zone only — in aisle walkway but not on a shelf
+                # Storage zone only — in aisle walkway, not on a shelf
                 stats[zone_id]['aisle_objects'] += 1
-            elif path in (['zone', 'aisle', 'shelf', 'object'],
-                          ['zone', 'shelf', 'object']):
-                # Storage zone only — on shelf area but no section match
+            elif path == ['zone', 'shelf', 'object']:
+                # Storage zone only — on shelf XY area but no section match
                 stats[zone_id]['shelf_objects'] += 1
-            elif path in (['zone', 'aisle', 'shelf', 'section', 'object'],
-                          ['zone', 'shelf', 'section', 'object']):
+            elif path == ['zone', 'shelf', 'section', 'object']:
                 # Storage zone only — fully assigned on a shelf section
                 stats[zone_id]['section_objects'] += 1
 

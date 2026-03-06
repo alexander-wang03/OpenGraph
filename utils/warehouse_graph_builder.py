@@ -12,11 +12,11 @@ Hierarchy varies by zone type:
   Non-storage zones (receiving, packing, forklift, etc.):
     Zone → Object   (direct — these are open floor areas with no aisles/shelves)
 
-  Storage zone only:
-    Zone → Aisle → Shelf → Section → Object  (full path, object on shelf level)
-    Zone → Aisle → Shelf → Object            (object in shelf area, no section match)
-    Zone → Aisle → Object                    (object in aisle walkway)
-    Zone → Object                            (fallback — in storage but unmatched)
+  Storage zone only (aisles and shelves are sibling children of the zone):
+    Zone → Shelf → Section → Object  (object centroid inside a shelf bounding box)
+    Zone → Shelf → Object            (in shelf XY area, no matching section)
+    Zone → Aisle → Object            (in aisle walkway, not in any shelf)
+    Zone → Object                    (fallback — in storage zone but unmatched)
 
 Author: awang (TierGraph thesis)
 Date: 2026-02-10
@@ -52,12 +52,12 @@ class WarehouseGraphBuilder:
     Non-storage zones (receiving, packing, forklift, hub_robot, general)
     are open floor areas — objects there attach directly to the zone node.
 
-    Storage zone hierarchy:
+    Storage zone hierarchy (aisles and shelves are siblings under the zone):
         zone_storage
-         └─ Aisle (corridors between shelf rows)
-             └─ Shelf (shelving units, children of their adjacent aisle)
-                 └─ Section (vertical tiers on a shelf)
-                     └─ Object
+         ├─ Aisle   (corridor between shelf rows; objects in the walkway attach here)
+         └─ Shelf   (shelving unit; takes priority over aisle in containment check)
+             └─ Section (vertical tier on a shelf)
+                 └─ Object
 
     Non-storage zone hierarchy:
         zone_receiving / zone_packing / zone_forklift / ...
@@ -111,7 +111,10 @@ class WarehouseGraphBuilder:
                     zone_node.children.append(aisle_node.id)
                     self.edges.append((zone_node.id, aisle_node.id, 'contains'))
 
-            # Add shelves within this zone
+            # Add shelves within this zone.
+            # Shelves are always direct children of the zone — they are siblings
+            # of aisles, not children.  Objects are assigned to whichever element
+            # (shelf or aisle) contains their centroid.
             if 'shelves' in zone_data and zone_data['shelves']:
                 for shelf_id, shelf_data in zone_data['shelves'].items():
                     shelf_node = HierarchyNode(
@@ -119,23 +122,11 @@ class WarehouseGraphBuilder:
                         type='shelf',
                         name=f"Shelf {shelf_id}",
                         bounds=shelf_data['bounds'],
-                        parent_id=zone_node.id  # Will refine to aisle if applicable
+                        parent_id=zone_node.id
                     )
                     self.nodes[shelf_node.id] = shelf_node
-
-                    # Find which aisle this shelf belongs to (based on adjacent_aisles)
-                    adjacent_aisles = shelf_data.get('adjacent_aisles', [])
-                    if adjacent_aisles:
-                        # Assign to first adjacent aisle for now
-                        aisle_id = adjacent_aisles[0]
-                        if aisle_id in self.nodes:
-                            shelf_node.parent_id = aisle_id
-                            self.nodes[aisle_id].children.append(shelf_node.id)
-                            self.edges.append((aisle_id, shelf_node.id, 'contains'))
-                    else:
-                        # No aisle, directly under zone
-                        zone_node.children.append(shelf_node.id)
-                        self.edges.append((zone_node.id, shelf_node.id, 'contains'))
+                    zone_node.children.append(shelf_node.id)
+                    self.edges.append((zone_node.id, shelf_node.id, 'contains'))
 
                     # Add sections within this shelf
                     if 'sections' in shelf_data and shelf_data['sections']:
@@ -221,45 +212,47 @@ class WarehouseGraphBuilder:
                 return child_id
         return None
 
-    def find_containing_shelf(self, point: np.ndarray, aisle_id: Optional[str], zone_id: str) -> Optional[str]:
-        """Find which shelf contains the point.
-
-        If aisle_id is given, restrict the search to that aisle's shelves.
-        If aisle_id is None, search all shelves reachable from zone_id —
-        both direct children of the zone and children of its aisles.
-        Shelves in zone_storage are always under aisles (never direct zone
-        children), so the aisle traversal is essential for the storage zone.
-        """
-        # Specific aisle given — check only that aisle's shelves
-        if aisle_id:
-            aisle_node = self.nodes.get(aisle_id)
-            if aisle_node:
-                for child_id in aisle_node.children:
-                    child = self.nodes.get(child_id)
-                    if child and child.type == 'shelf' and self.point_in_bounds(point, child.bounds):
-                        return child_id
-            return None
-
-        # No aisle given: walk zone → aisles → shelves (and any direct zone shelves)
+    def find_containing_shelf(self, point: np.ndarray, zone_id: str) -> Optional[str]:
+        """Find which shelf (direct zone child) contains the point."""
         zone_node = self.nodes.get(zone_id)
         if not zone_node:
             return None
 
         for child_id in zone_node.children:
             child = self.nodes.get(child_id)
-            if child is None:
-                continue
-            # Shelf directly under the zone (rare — only if no adjacent aisle)
-            if child.type == 'shelf' and self.point_in_bounds(point, child.bounds):
+            if child and child.type == 'shelf' and self.point_in_bounds(point, child.bounds):
                 return child_id
-            # Normal case: shelf is a child of an aisle
-            if child.type == 'aisle':
-                for grandchild_id in child.children:
-                    grandchild = self.nodes.get(grandchild_id)
-                    if grandchild and grandchild.type == 'shelf' and self.point_in_bounds(point, grandchild.bounds):
-                        return grandchild_id
-
         return None
+
+    def find_nearest_structure(self, point: np.ndarray, zone_id: str) -> Tuple[Optional[str], Optional[str]]:
+        """
+        Return the (node_id, node_type) of the nearest aisle or shelf in the zone.
+
+        Used as a fallback when a point is inside the storage zone but falls in a
+        thin gap not covered by any aisle or shelf AABB.  This typically happens at
+        the zone's left/right edges due to AABB inflation after coordinate rotation.
+        """
+        zone_node = self.nodes.get(zone_id)
+        if not zone_node:
+            return None, None
+
+        best_id = None
+        best_type = None
+        best_dist = float('inf')
+
+        for child_id in zone_node.children:
+            child = self.nodes.get(child_id)
+            if child is None or child.type not in ('aisle', 'shelf'):
+                continue
+            cx = child.bounds['center']['x']
+            cy = child.bounds['center']['y']
+            dist = (point[0] - cx) ** 2 + (point[1] - cy) ** 2
+            if dist < best_dist:
+                best_dist = dist
+                best_id = child_id
+                best_type = child.type
+
+        return best_id, best_type
 
     def find_containing_section(self, point: np.ndarray, shelf_id: str) -> Optional[str]:
         """Find which section on the shelf contains the point."""
@@ -318,7 +311,7 @@ class WarehouseGraphBuilder:
             return True, path
 
         # Step 3: Storage zone - check if object is in a shelf area (XY containment)
-        shelf_id = self.find_containing_shelf(object_position, None, zone_id)
+        shelf_id = self.find_containing_shelf(object_position, zone_id)
 
         if shelf_id:
             # Object is in shelf XY area - try to find specific section (uses XYZ)
@@ -374,7 +367,45 @@ class WarehouseGraphBuilder:
             path = f"{zone_id} → {aisle_id} → {object_id}"
             return True, path
 
-        # Step 5: In storage zone but not in shelf or aisle - assign directly to zone
+        # Step 5: In storage zone but outside every aisle and shelf AABB.
+        # This can occur at zone edges due to AABB inflation after coordinate
+        # rotation (the zone's outer boundary extends slightly beyond the
+        # outermost shelf/aisle AABBs).  Fall back to the nearest structure.
+        nearest_id, nearest_type = self.find_nearest_structure(object_position, zone_id)
+
+        if nearest_id and nearest_type == 'shelf':
+            section_id = self.find_containing_section(object_position, nearest_id)
+            parent_id = section_id if section_id else nearest_id
+            object_node = HierarchyNode(
+                id=object_id,
+                type='object',
+                name=object_caption if object_caption else f"Object {object_id}",
+                bounds={'center': {'x': object_position[0], 'y': object_position[1], 'z': object_position[2]}},
+                parent_id=parent_id
+            )
+            self.nodes[object_id] = object_node
+            self.nodes[parent_id].children.append(object_id)
+            self.edges.append((parent_id, object_id, 'contains'))
+            print(f"  [edge-fallback] {object_id} → nearest shelf {nearest_id}")
+            path = f"{zone_id} → {nearest_id} → {section_id} → {object_id}" if section_id else f"{zone_id} → {nearest_id} → {object_id}"
+            return True, path
+
+        if nearest_id and nearest_type == 'aisle':
+            object_node = HierarchyNode(
+                id=object_id,
+                type='object',
+                name=object_caption if object_caption else f"Object {object_id}",
+                bounds={'center': {'x': object_position[0], 'y': object_position[1], 'z': object_position[2]}},
+                parent_id=nearest_id
+            )
+            self.nodes[object_id] = object_node
+            self.nodes[nearest_id].children.append(object_id)
+            self.edges.append((nearest_id, object_id, 'contains'))
+            print(f"  [edge-fallback] {object_id} → nearest aisle {nearest_id}")
+            path = f"{zone_id} → {nearest_id} → {object_id}"
+            return True, path
+
+        # True fallback: layout has no aisles or shelves in this zone (shouldn't happen)
         object_node = HierarchyNode(
             id=object_id,
             type='object',
@@ -385,7 +416,6 @@ class WarehouseGraphBuilder:
         self.nodes[object_id] = object_node
         self.nodes[zone_id].children.append(object_id)
         self.edges.append((zone_id, object_id, 'contains'))
-
         path = f"{zone_id} → {object_id}"
         return True, path
 

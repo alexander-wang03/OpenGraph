@@ -6,6 +6,9 @@ This version visualizes the warehouse layout in the original Isaac Sim global
 frame, making it match the warehouse_layout.json visualization. Point clouds
 are transformed from robot frame back to global frame.
 
+Click on a white centroid sphere to highlight the associated point cloud.
+Press Esc to deselect.
+
 Usage:
     python script/visualize_tiergraph_global.py --config-name=isaac_warehouse sequence=02
 """
@@ -13,12 +16,15 @@ Usage:
 import sys
 sys.path.append("/home/awang/Documents/TRAILbot/OpenGraph")
 
+import copy
 import json
 import gzip
 import pickle
 import hydra
 import numpy as np
 import open3d as o3d
+import open3d.visualization.gui as gui
+import open3d.visualization.rendering as rendering
 from pathlib import Path
 from omegaconf import DictConfig
 from some_class.map_calss import MapObjectList
@@ -217,7 +223,7 @@ def print_color_legend(obj_map, objects):
     print("  Sections:      Yellow/orange wireframe (storage zone only)")
 
     print(f"\nObjects (total: {len(objects)}):")
-    print("  Centroid markers: Small white spheres")
+    print("  Centroid markers: Small white spheres (click to highlight)")
     print("  Boundaries:       White wireframe boxes")
     print("  Point clouds colored by zone assignment:")
     print("    - Storage zone objects:  Green shades")
@@ -329,6 +335,330 @@ def create_floor_mesh(floor_vertices, floor_z=-0.14, color=[0.5, 0.5, 0.5]):
     return mesh
 
 
+class TierGraphViewer:
+    """
+    Interactive TierGraph viewer with click-to-highlight support.
+
+    Click a white centroid sphere to highlight the selected object's point
+    cloud (shows original RGB) and dim all others.  Press Esc to deselect.
+    """
+
+    SPHERE_RADIUS = 0.10   # centroid marker radius (m)
+    HIT_RADIUS    = 0.25   # slightly larger hit sphere for easier clicking
+
+    def __init__(self, pcds, instance_colors, centroids,
+                 obj_hierarchy_map, objects, infra_geometries):
+        """
+        Args:
+            pcds: list of o3d.PointCloud (global frame, colors may be set)
+            instance_colors: list of [r,g,b] per object (hierarchy colors)
+            centroids: list of np.ndarray shape (3,), one per object
+            obj_hierarchy_map: {obj_id: {zone, shelf, section, aisle}}
+            objects: MapObjectList (for captions)
+            infra_geometries: list of (name: str, geom, shader: str)
+        """
+        self.pcds = pcds
+        self.instance_colors = instance_colors
+        self.centroids = centroids
+        self.obj_hierarchy_map = obj_hierarchy_map
+        self.objects = objects
+        self.n = len(pcds)
+        self.selected = -1
+        self._click_start = None
+
+        app = gui.Application.instance
+        app.initialize()
+
+        self.win = app.create_window(
+            "TierGraph Visualization (Isaac Sim Global Frame)", 1920, 1080)
+        em = self.win.theme.font_size
+
+        # ---------- info label overlaid at the top ----------
+        self.info_label = gui.Label(
+            "Click a white centroid sphere to inspect an object    |    Esc = deselect")
+
+        panel = gui.Horiz(0, gui.Margins(int(0.5 * em), int(0.3 * em),
+                                         int(0.5 * em), int(0.3 * em)))
+        panel.background_color = gui.Color(0, 0, 0, 0.75)
+        panel.add_child(self.info_label)
+        self._panel = panel
+
+        # ---------- 3-D scene widget ----------
+        self._scene = gui.SceneWidget()
+        self._scene.scene = rendering.Open3DScene(self.win.renderer)
+
+        self.win.add_child(self._scene)
+        self.win.add_child(panel)
+
+        def on_layout(ctx):
+            r = self.win.content_rect
+            self._scene.frame = r
+            pref = panel.calc_preferred_size(ctx, gui.Widget.Constraints())
+            panel.frame = gui.Rect(r.x, r.y, r.width, pref.height)
+
+        self.win.set_on_layout(on_layout)
+        self.win.set_on_key(self._on_key)
+        self._scene.set_on_mouse(self._on_mouse)
+
+        # ---------- materials (kept as instance vars for use in select/deselect) ----------
+        self._pcd_mat = rendering.MaterialRecord()
+        self._pcd_mat.shader = "defaultUnlit"
+        self._pcd_mat.point_size = 4.0
+
+        self._mesh_mat = rendering.MaterialRecord()
+        self._mesh_mat.shader = "defaultUnlit"
+
+        # ---------- infrastructure geometries (static) ----------
+        for name, geom, shader in infra_geometries:
+            mat = rendering.MaterialRecord()
+            mat.shader = shader
+            if shader == "unlitLine":
+                mat.line_width = 1.5
+            elif shader == "defaultLit":
+                mat.shader = "defaultLit"
+            self._scene.scene.add_geometry(name, geom, mat)
+
+        # ---------- per-object geometry ----------
+        # Store all variants as instance variables; only the 'normal' variant
+        # is in the scene initially.  _select/_deselect swap with remove+add,
+        # which is more reliable than show_geometry toggling.
+        self._pcd_variants    = {}   # i -> {'normal', 'highlighted', 'dimmed'}
+        self._marker_variants = {}   # i -> {'normal', 'selected'}
+        self._obj_state       = {}   # i -> 'normal' | 'highlighted' | 'dimmed'
+
+        for i in range(self.n):
+            pcd = pcds[i]
+
+            if len(pcd.points) == 0:
+                self._obj_state[i] = 'empty'
+                continue
+
+            # PCDs
+            pcd_normal = copy.deepcopy(pcd)
+            pcd_normal.paint_uniform_color(instance_colors[i])
+
+            # Highlighted: blend instance color 60% toward white
+            base = np.array(instance_colors[i])
+            lighter = base + (1.0 - base) * 0.6
+            lighter = np.clip(lighter, 0.0, 1.0)
+            pcd_hl = copy.deepcopy(pcd)
+            pcd_hl.paint_uniform_color(lighter.tolist())
+
+            self._pcd_variants[i] = {
+                'normal':      pcd_normal,
+                'highlighted': pcd_hl,
+            }
+
+            # Markers
+            c = centroids[i]
+
+            m_normal = o3d.geometry.TriangleMesh.create_sphere(radius=self.SPHERE_RADIUS)
+            m_normal.translate(c)
+            m_normal.paint_uniform_color([1.0, 1.0, 1.0])
+            m_normal.compute_vertex_normals()
+
+            m_sel = o3d.geometry.TriangleMesh.create_sphere(radius=self.SPHERE_RADIUS * 1.5)
+            m_sel.translate(c)
+            m_sel.paint_uniform_color([1.0, 0.85, 0.0])
+            m_sel.compute_vertex_normals()
+
+            self._marker_variants[i] = {'normal': m_normal, 'selected': m_sel}
+
+            # Add only the normal variant to the scene initially
+            self._scene.scene.add_geometry(f"pcd_{i}",    pcd_normal, self._pcd_mat)
+            self._scene.scene.add_geometry(f"marker_{i}", m_normal,   self._mesh_mat)
+            self._obj_state[i] = 'normal'
+
+        # ---------- initial camera ----------
+        bounds = self._scene.scene.bounding_box
+        self._scene.setup_camera(60.0, bounds, bounds.get_center())
+
+        print("\n" + "="*60)
+        print("VISUALIZATION READY")
+        print("="*60)
+        print("Click a white centroid sphere to inspect an object")
+        print("Press Esc to deselect  |  Close window to exit")
+        print("="*60 + "\n")
+
+    # ------------------------------------------------------------------
+    # Event handlers
+    # ------------------------------------------------------------------
+
+    def _on_key(self, event):
+        if (event.type == gui.KeyEvent.DOWN and
+                event.key == gui.KeyName.ESCAPE):
+            self._deselect()
+            return gui.Widget.EventCallbackResult.HANDLED
+        return gui.Widget.EventCallbackResult.IGNORED
+
+    def _on_mouse(self, event):
+        if event.type == gui.MouseEvent.Type.BUTTON_DOWN:
+            if event.buttons & int(gui.MouseButton.LEFT):
+                self._click_start = (event.x, event.y)
+            return gui.Widget.EventCallbackResult.IGNORED
+
+        if event.type == gui.MouseEvent.Type.BUTTON_UP:
+            if self._click_start is not None:
+                start_x, start_y = self._click_start
+                dx = event.x - start_x
+                dy = event.y - start_y
+                self._click_start = None
+                if dx * dx + dy * dy < 25:   # <5 px = click, not drag
+                    hit = self._pick(start_x, start_y)
+                    print(f"[DBG] click at ({start_x},{start_y})  pick={hit}")
+                    if hit >= 0:
+                        self._select(hit)
+                    else:
+                        self._deselect()
+
+        return gui.Widget.EventCallbackResult.IGNORED
+
+    # ------------------------------------------------------------------
+    # Picking
+    # ------------------------------------------------------------------
+
+    def _pick(self, wx, wy):
+        """Return index of centroid hit by click at window pos (wx, wy), else -1."""
+        r = self._scene.frame
+        sx     = wx - r.x
+        sy_gui = wy - r.y          # GUI convention: y=0 at top
+        W, H   = r.width, r.height
+
+        cam = self._scene.scene.camera
+
+        # Camera eye in world space (from view matrix: eye = -R^T @ t)
+        V   = np.array(cam.get_view_matrix())
+        eye = -(V[:3, :3].T @ V[:3, 3])
+
+        # Convert screen pixel to NDC.
+        # GUI: y=0 at top. NDC (OpenGL): y=-1 at bottom, +1 at top.
+        ndc_x =  2.0 * sx / W - 1.0
+        ndc_y = 1.0 - 2.0 * sy_gui / H
+
+        # Unproject through inverse projection + inverse view matrices.
+        # This gives a correct per-pixel world-space ray — unlike cam.unproject(z=0)
+        # which returns a near-plane point only ~0.1 m from eye (essentially no
+        # per-pixel variation).
+        P     = np.array(cam.get_projection_matrix())
+        P_inv = np.linalg.inv(P)
+        V_inv = np.linalg.inv(V)
+
+        # NDC near-plane → view space (perspective divide)
+        p_clip     = np.array([ndc_x, ndc_y, -1.0, 1.0])
+        p_view_hom = P_inv @ p_clip
+        p_view     = p_view_hom[:3] / p_view_hom[3]
+
+        # View space → world space
+        p_world_hom = V_inv @ np.array([p_view[0], p_view[1], p_view[2], 1.0])
+        p_world     = p_world_hom[:3] / p_world_hom[3]
+
+        ray_dir = p_world - eye
+        norm = np.linalg.norm(ray_dir)
+        if norm < 1e-8:
+            return -1
+        ray_dir /= norm
+
+        # --- debug ---
+        print(f"[DBG-ray] eye={np.round(eye,2)}  p_world={np.round(p_world,2)}  dir={np.round(ray_dir,3)}")
+        valid_c = [(i, c) for i, c in enumerate(self.centroids)
+                   if c is not None and len(self.pcds[i].points) > 0]
+        if valid_c:
+            rows = []
+            for idx, c in valid_c[:5]:
+                oc   = c - eye
+                t_c  = float(np.dot(oc, ray_dir))
+                perp = float(np.linalg.norm(oc - t_c * ray_dir))
+                rows.append((perp, f"  centroid[{idx}] {np.round(c,2)}  t={t_c:.1f}  perp={perp:.2f}m"))
+            rows.sort(key=lambda x: x[0])
+            print("[DBG-ray] 5 closest candidates (perp dist to ray):")
+            for _, row in rows[:5]:
+                print(row)
+        # --- end debug ---
+
+        R2 = self.HIT_RADIUS ** 2
+        best_idx, best_t = -1, float('inf')
+
+        for i, c in enumerate(self.centroids):
+            if c is None or len(self.pcds[i].points) == 0:
+                continue
+            oc   = eye - c
+            b    = float(np.dot(oc, ray_dir))
+            disc = b * b - (float(np.dot(oc, oc)) - R2)
+            if disc >= 0:
+                t = -b - np.sqrt(max(disc, 0.0))
+                if 0 < t < best_t:
+                    best_t   = t
+                    best_idx = i
+
+        return best_idx
+
+    # ------------------------------------------------------------------
+    # Selection state
+    # ------------------------------------------------------------------
+
+    def _swap_obj(self, i, pcd_state, marker_state):
+        """Replace object i's scene geometry with the requested variant."""
+        if self._obj_state.get(i) == 'empty':
+            return
+        self._scene.scene.remove_geometry(f"pcd_{i}")
+        self._scene.scene.remove_geometry(f"marker_{i}")
+        self._scene.scene.add_geometry(
+            f"pcd_{i}",    self._pcd_variants[i][pcd_state],    self._pcd_mat)
+        self._scene.scene.add_geometry(
+            f"marker_{i}", self._marker_variants[i][marker_state], self._mesh_mat)
+        self._obj_state[i] = pcd_state
+
+    def _select(self, idx):
+        """Select object idx: highlight it, keep all others at normal color."""
+        self.selected = idx
+        for i in range(self.n):
+            if i == idx:
+                self._swap_obj(i, 'highlighted', 'selected')
+            else:
+                self._swap_obj(i, 'normal', 'normal')
+        self._update_info(idx)
+        self._scene.force_redraw()
+
+    def _deselect(self):
+        """Restore all objects to normal (unselected) state."""
+        self.selected = -1
+        for i in range(self.n):
+            self._swap_obj(i, 'normal', 'normal')
+        self.info_label.text = (
+            "Click a white centroid sphere to inspect an object    |    Esc = deselect")
+        self._scene.force_redraw()
+
+    def _update_info(self, idx):
+        """Update the info label for the selected object."""
+        obj_id = f"object_{idx}"
+        assignment = self.obj_hierarchy_map.get(obj_id, {})
+
+        obj = self.objects[idx]
+        captions = obj.get('captions', [])
+        caption = captions[0] if captions else obj.get('caption', f"Object {idx}")
+
+        parts = []
+        if assignment.get('zone'):
+            parts.append(assignment['zone'])
+        if assignment.get('aisle'):
+            parts.append(assignment['aisle'])
+        if assignment.get('shelf'):
+            parts.append(assignment['shelf'])
+        if assignment.get('section'):
+            parts.append(assignment['section'])
+        parts.append(obj_id)
+        path = " -> ".join(parts)
+
+        c = self.centroids[idx]
+        self.info_label.text = (
+            f"[{idx}] {caption[:60]}  |  {path}  |  "
+            f"({c[0]:.2f}, {c[1]:.2f}, {c[2]:.2f})"
+        )
+
+    def run(self):
+        gui.Application.instance.run()
+
+
 @hydra.main(version_base=None, config_path="../config", config_name="isaac_warehouse")
 def main(cfg: DictConfig):
     print("\n" + "="*60)
@@ -338,12 +668,14 @@ def main(cfg: DictConfig):
     # Paths
     result_path = Path(cfg.result_path)
     sequence_dir = Path(cfg.basedir) / cfg.sequence
-    warehouse_layout_path = "/home/awang/Documents/TRAILbot/Isaac-sim-husky-navigation/src/isaaccomponentspython/Data/warehouse_layout.json"
+    warehouse_layout_path = str(
+        Path(__file__).parent.parent / "data" / "warehouse_layout" / "warehouse_layout.json"
+    )
     tiergraph_path = Path(cfg.scenegraph_path)
 
     # Load data
     print(f"Loading OpenGraph results from {result_path}...")
-    objects, bg_objects = load_opengraph_results(result_path)
+    objects, _ = load_opengraph_results(result_path)
     print(f"  Loaded {len(objects)} objects")
 
     print(f"Loading TierGraph from {tiergraph_path}...")
@@ -492,13 +824,7 @@ def main(cfg: DictConfig):
             }
         }
 
-        # Special styling for storage zone (thicker, brighter)
-        if zone_id == 'zone_storage':
-            zone_lineset = create_bbox_lineset(zone_bounds, wireframe_color)
-            # Make storage zone lines thicker (we'll need to modify this via Open3D)
-        else:
-            zone_lineset = create_bbox_lineset(zone_bounds, wireframe_color)
-
+        zone_lineset = create_bbox_lineset(zone_bounds, wireframe_color)
         zone_boxes.append((zone_lineset, zone_id, zone_name))
 
         # Create zone label (text)
@@ -520,7 +846,7 @@ def main(cfg: DictConfig):
             # Create aisle boxes (corridors between shelves)
             aisles = zone.get('aisles', {})
             if isinstance(aisles, dict):
-                for aisle_id, aisle in aisles.items():
+                for _, aisle in aisles.items():
                     # Aisles shown as semi-transparent yellow boxes
                     aisle_lineset = create_bbox_lineset(aisle['bounds'], [0.9, 0.9, 0.0])
                     aisle_boxes.append(aisle_lineset)
@@ -528,7 +854,7 @@ def main(cfg: DictConfig):
             # Create shelf boxes (blue wireframes)
             shelves = zone.get('shelves', {})
             if isinstance(shelves, dict):
-                for shelf_id, shelf in shelves.items():
+                for _, shelf in shelves.items():
                     lineset = create_bbox_lineset(shelf['bounds'], [0.2, 0.4, 1.0])
                     shelf_boxes.append(lineset)
 
@@ -567,11 +893,10 @@ def main(cfg: DictConfig):
 
     print(f"  Created {len(object_boxes)} object bounding boxes")
 
-    # 5. Create object centroid markers (small spheres with object IDs)
-    object_markers = []
+    # 5. Compute centroids (for click-to-highlight picking)
+    centroids = []
     for i, obj in enumerate(objects):
         if len(obj['pcd'].points) > 0:
-            # Compute centroid in global frame
             points_robot = np.asarray(obj['pcd'].points)
             if has_first_pose:
                 points_global = transform_points_to_global(points_robot, T_first)
@@ -579,16 +904,11 @@ def main(cfg: DictConfig):
             else:
                 points_global = points_robot.copy()
                 points_global[:, 2] += Z_OFFSET
+            centroids.append(points_global.mean(axis=0))
+        else:
+            centroids.append(None)
 
-            centroid = points_global.mean(axis=0)
-
-            # Create small sphere at centroid
-            marker_sphere = o3d.geometry.TriangleMesh.create_sphere(radius=0.1)
-            marker_sphere.translate(centroid)
-            marker_sphere.paint_uniform_color([1.0, 1.0, 1.0])  # White marker
-            object_markers.append(marker_sphere)
-
-    print(f"  Created {len(object_markers)} object centroid markers")
+    print(f"  Computed {sum(c is not None for c in centroids)} object centroids")
 
     # Print detailed object information for reference
     print("\n" + "="*60)
@@ -619,7 +939,7 @@ def main(cfg: DictConfig):
             path_parts.append(assignment['section'])
         path_parts.append(obj_id)
 
-        hierarchy_path = " → ".join(path_parts) if path_parts else obj_id
+        hierarchy_path = " -> ".join(path_parts) if path_parts else obj_id
 
         # Print with color indicator
         color = instance_colors[i]
@@ -633,60 +953,39 @@ def main(cfg: DictConfig):
 
     print("="*60 + "\n")
 
-    # Initialize visualizer
-    print("\nInitializing Open3D visualizer...")
-    vis = o3d.visualization.VisualizerWithKeyCallback()
-    vis.create_window(window_name="TierGraph (Isaac Sim Global Frame)", width=1920, height=1080)
+    # 6. Build infra_geometries list for TierGraphViewer
+    infra = []
+    infra.append(("floor_mesh", floor_mesh, "defaultUnlit"))
 
-    # Add geometries in order (back to front for proper transparency)
-    # 1. Floor
-    vis.add_geometry(floor_mesh)
+    for zone_floor, zid in zone_floor_meshes:
+        infra.append((f"zone_floor_{zid}", zone_floor, "defaultUnlit"))
 
-    # 2. Zone floor polygons (semi-transparent colored regions)
-    for zone_floor, _ in zone_floor_meshes:
-        vis.add_geometry(zone_floor)
+    for zone_lineset, zid, _ in zone_boxes:
+        infra.append((f"zone_box_{zid}", zone_lineset, "unlitLine"))
 
-    # 3. Zone bounding boxes (wireframes)
-    for zone_lineset, _, _ in zone_boxes:
-        vis.add_geometry(zone_lineset)
+    for ai, aisle_box in enumerate(aisle_boxes):
+        infra.append((f"aisle_{ai}", aisle_box, "unlitLine"))
 
-    # 4. Aisles (storage zone only)
-    for aisle_box in aisle_boxes:
-        vis.add_geometry(aisle_box)
+    for si, shelf_box in enumerate(shelf_boxes):
+        infra.append((f"shelf_{si}", shelf_box, "unlitLine"))
 
-    # 5. Shelves and sections (storage zone only)
-    for shelf_box in shelf_boxes:
-        vis.add_geometry(shelf_box)
+    for bi, obj_box in enumerate(object_boxes):
+        infra.append((f"objbox_{bi}", obj_box, "unlitLine"))
 
-    # 6. Object bounding boxes
-    for obj_box in object_boxes:
-        vis.add_geometry(obj_box)
-
-    # 7. Object centroid markers (small white spheres)
-    for marker in object_markers:
-        vis.add_geometry(marker)
-
-    # 8. Object point clouds (colored by hierarchy)
-    for pcd in pcds:
-        vis.add_geometry(pcd)
-
-    # Color by instance
-    for i, pcd in enumerate(pcds):
-        pcd.paint_uniform_color(instance_colors[i])
-
-    # Add coordinate frame
     coord_frame = o3d.geometry.TriangleMesh.create_coordinate_frame(size=2.0, origin=[0, 0, 0])
-    vis.add_geometry(coord_frame)
+    infra.append(("coord_frame", coord_frame, "defaultLit"))
 
-    print("Colored by instance")
-    print("\n" + "="*60)
-    print("VISUALIZATION READY")
-    print("="*60)
-    print("Close window when done (press Q or close button)")
-    print("="*60 + "\n")
-
-    vis.run()
-    vis.destroy_window()
+    # 7. Launch interactive viewer
+    print("\nInitializing Open3D GUI visualizer with click-to-highlight...")
+    viewer = TierGraphViewer(
+        pcds=pcds,
+        instance_colors=instance_colors,
+        centroids=centroids,
+        obj_hierarchy_map=obj_hierarchy_map,
+        objects=objects,
+        infra_geometries=infra,
+    )
+    viewer.run()
 
 
 if __name__ == "__main__":
