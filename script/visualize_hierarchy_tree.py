@@ -2,10 +2,22 @@
 """
 Visualize TierGraph Hierarchy as an Interactive Tree
 
-Creates an interactive 2D hierarchical tree diagram showing the warehouse structure
-with zone-specific hierarchy logic:
-- Non-storage zones: Zone → Object (direct)
-- Storage zone: Zone → Aisle → Object OR Zone → Shelf → Section → Object
+Creates an interactive 2D hierarchical tree diagram showing the warehouse structure.
+
+Actual hierarchy (from warehouse_graph_builder.py):
+
+  Non-storage zones (receiving, packing, forklift, hub_robot, general):
+    Zone → Object   (direct — these are open floor areas, no aisles or shelves)
+
+  Storage zone only:
+    Infrastructure:  Zone → Aisle → Shelf → Section
+                     Zone → Shelf → Section  (rare: shelf with no adjacent aisle)
+
+    Object assignment (4 cases, storage zone only):
+    1. On shelf with section → Zone → Aisle → Shelf → Section → Object (full depth)
+    2. On shelf, no section  → Zone → Aisle → Shelf → Object
+    3. In aisle walkway      → Zone → Aisle → Object
+    4. Unmatched (fallback)  → Zone → Object
 
 Features:
 - Interactive zoom/pan to handle dense graphs
@@ -130,15 +142,19 @@ def build_hierarchy_stats(tiergraph):
     """
     Analyze hierarchy structure to understand zone-specific patterns.
 
+    Non-storage zones always produce Zone → Object (direct_objects).
+    The aisle_objects / shelf_objects / section_objects counters are
+    meaningful only for zone_storage.
+
     Returns dict with statistics about each zone's hierarchy depth and structure.
     """
     nodes_dict = {node['id']: node for node in tiergraph['nodes']}
     stats = defaultdict(lambda: {
         'total_objects': 0,
-        'direct_objects': 0,
-        'aisle_objects': 0,
-        'shelf_objects': 0,
-        'section_objects': 0,
+        'direct_objects': 0,     # Zone → Object (non-storage zones always; storage fallback)
+        'aisle_objects': 0,      # Zone → Aisle → Object  (storage zone only)
+        'shelf_objects': 0,      # Zone → Aisle → Shelf → Object  (storage zone only)
+        'section_objects': 0,    # Zone → Aisle → Shelf → Section → Object  (storage zone only)
         'aisles': set(),
         'shelves': set(),
         'sections': set()
@@ -175,86 +191,76 @@ def build_hierarchy_stats(tiergraph):
 
             stats[zone_id]['total_objects'] += 1
 
-            # Classify hierarchy depth
+            # Classify hierarchy depth.
+            #
+            # Non-storage zones:
+            #   zone → object          (always direct — no aisles in these zones)
+            #
+            # Storage zone:
+            #   full path:   zone → aisle → shelf → section → object
+            #   shelf miss:  zone → aisle → shelf → object
+            #   aisle only:  zone → aisle → object
+            #   unmatched:   zone → object
+            #   Rare:        zone → shelf → (section →) object  (shelf with no aisle)
             if path == ['zone', 'object']:
                 stats[zone_id]['direct_objects'] += 1
             elif path == ['zone', 'aisle', 'object']:
+                # Storage zone only — in aisle walkway but not on a shelf
                 stats[zone_id]['aisle_objects'] += 1
-            elif path == ['zone', 'shelf', 'object']:
+            elif path in (['zone', 'aisle', 'shelf', 'object'],
+                          ['zone', 'shelf', 'object']):
+                # Storage zone only — on shelf area but no section match
                 stats[zone_id]['shelf_objects'] += 1
-            elif path == ['zone', 'shelf', 'section', 'object']:
+            elif path in (['zone', 'aisle', 'shelf', 'section', 'object'],
+                          ['zone', 'shelf', 'section', 'object']):
+                # Storage zone only — fully assigned on a shelf section
                 stats[zone_id]['section_objects'] += 1
 
     return stats
 
 
-def create_hierarchical_layout(G, root_nodes, vertical_spacing=4.0, horizontal_spacing=8.0):
+def create_tree_layout(G, root_nodes, vertical_spacing=2.0, leaf_spacing=1.0):
     """
-    Create a hierarchical layout using Sugiyama-style algorithm.
+    Reingold-Tilford-style tree layout that guarantees no edge crossings.
 
-    This places nodes in levels based on their distance from root,
-    then arranges them horizontally to minimize edge crossings.
+    Leaves are placed consecutively left-to-right; each parent is centred
+    over its children's x-range.  All nodes at the same BFS depth share
+    the same y-coordinate so hierarchy levels are clearly aligned.
     """
     pos = {}
+    leaf_counter = [0]  # list so the nested closure can mutate it
 
-    # Assign levels to nodes (BFS from roots)
-    levels = {}
-    max_level = 0
-    node_types = {}
-
+    # BFS depth so every node has a consistent y regardless of which root
+    # subtree it belongs to.
+    depths = {}
     for root in root_nodes:
         queue = [(root, 0)]
         visited = set()
-
         while queue:
-            node, level = queue.pop(0)
+            node, depth = queue.pop(0)
             if node in visited:
                 continue
             visited.add(node)
-
-            if node not in levels or level < levels[node]:
-                levels[node] = level
-                max_level = max(max_level, level)
-                # Store node type for spacing adjustments
-                node_types[node] = G.nodes[node].get('type', 'unknown')
-
+            depths[node] = depth
             for child in G.successors(node):
                 if child not in visited:
-                    queue.append((child, level + 1))
+                    queue.append((child, depth + 1))
 
-    # Group nodes by level
-    nodes_by_level = defaultdict(list)
-    for node, level in levels.items():
-        nodes_by_level[level].append(node)
-
-    # Position nodes with adaptive spacing
-    for level in range(max_level + 1):
-        nodes_at_level = sorted(nodes_by_level[level])
-        num_nodes = len(nodes_at_level)
-
-        # Adaptive vertical spacing (more space for object-heavy levels)
-        if level == 0:
-            y = 0  # Zones at top
+    def assign_x(node):
+        """Post-order DFS: place children first, then centre parent over them."""
+        children = sorted(G.successors(node))
+        if not children:
+            x = leaf_counter[0] * leaf_spacing
+            leaf_counter[0] += 1
         else:
-            # Increase vertical spacing for deeper levels
-            y = -level * vertical_spacing
+            for child in children:
+                assign_x(child)
+            x = (pos[children[0]][0] + pos[children[-1]][0]) / 2
+        pos[node] = (x, -depths[node] * vertical_spacing)
 
-        # Adaptive horizontal spacing based on node count
-        if num_nodes > 20:
-            # Very crowded level - use tighter spacing but wider spread
-            level_h_spacing = horizontal_spacing * 0.6
-        elif num_nodes > 10:
-            level_h_spacing = horizontal_spacing * 0.8
-        else:
-            level_h_spacing = horizontal_spacing
-
-        # Center nodes horizontally
-        total_width = (num_nodes - 1) * level_h_spacing
-        x_start = -total_width / 2
-
-        for i, node in enumerate(nodes_at_level):
-            x = x_start + i * level_h_spacing
-            pos[node] = (x, y)
+    for root in sorted(root_nodes):
+        assign_x(root)
+        leaf_counter[0] += 1  # small gap between separate root subtrees
 
     return pos
 
@@ -369,16 +375,20 @@ def main(cfg: DictConfig):
 
     for zone_id, zstats in sorted(zone_stats.items()):
         zone_name = zone_id.replace('zone_', '').title()
+        is_storage = zone_id == 'zone_storage'
         print(f"\n  {zone_name} Zone:")
         print(f"    Total objects: {zstats['total_objects']}")
         if zstats['direct_objects'] > 0:
-            print(f"    Direct (Zone → Object): {zstats['direct_objects']}")
-        if zstats['aisle_objects'] > 0:
-            print(f"    Via Aisle: {zstats['aisle_objects']}")
-        if zstats['shelf_objects'] > 0:
-            print(f"    Via Shelf: {zstats['shelf_objects']}")
-        if zstats['section_objects'] > 0:
-            print(f"    Via Section: {zstats['section_objects']}")
+            label = "Zone → Object (fallback)" if is_storage else "Zone → Object (direct)"
+            print(f"    {label}: {zstats['direct_objects']}")
+        # Aisle / shelf / section breakdowns only apply to storage zone
+        if is_storage:
+            if zstats['aisle_objects'] > 0:
+                print(f"    Zone → Aisle → Object: {zstats['aisle_objects']}")
+            if zstats['shelf_objects'] > 0:
+                print(f"    Zone → Aisle → Shelf → Object: {zstats['shelf_objects']}")
+            if zstats['section_objects'] > 0:
+                print(f"    Zone → Aisle → Shelf → Section → Object: {zstats['section_objects']}")
 
     # Find root nodes (zones with no parents)
     root_nodes = [n for n in G.nodes() if G.in_degree(n) == 0]
@@ -386,35 +396,32 @@ def main(cfg: DictConfig):
 
     # Create hierarchical layout
     print("Computing hierarchical layout...")
-    pos = create_hierarchical_layout(G, root_nodes, vertical_spacing=2.0, horizontal_spacing=2.0)
+    pos = create_tree_layout(G, root_nodes, vertical_spacing=2.0, leaf_spacing=1.0)
 
     # Compute dynamic canvas size so that visual spacing scales with node count
-    # Each node should have at least MIN_PX_PER_NODE pixels of horizontal space
     MIN_PX_PER_NODE_H = 80
     MIN_PX_PER_NODE_V = 120
 
-    # Count nodes per level to find widest level
+    # Depth (for height) via BFS
     from collections import Counter
     levels_count = Counter()
     root_set = set(root_nodes)
     queue = [(r, 0) for r in root_set]
     visited_l = set()
-    level_map = {}
     while queue:
         n, lv = queue.pop(0)
         if n in visited_l:
             continue
         visited_l.add(n)
-        level_map[n] = lv
         levels_count[lv] += 1
         for ch in G.successors(n):
             if ch not in visited_l:
                 queue.append((ch, lv + 1))
 
-    max_nodes_per_level = max(levels_count.values()) if levels_count else 1
     max_depth = max(levels_count.keys()) + 1 if levels_count else 1
+    n_leaves = sum(1 for n in G.nodes() if G.out_degree(n) == 0)
 
-    fig_width = max(2000, max_nodes_per_level * MIN_PX_PER_NODE_H + 300)
+    fig_width = max(2000, n_leaves * MIN_PX_PER_NODE_H + 300)
     fig_height = max(1200, max_depth * MIN_PX_PER_NODE_V + 300)
 
     # Compute explicit axis ranges from data to prevent Plotly auto-scaling
@@ -425,7 +432,7 @@ def main(cfg: DictConfig):
     x_range = [min(all_x) - x_pad, max(all_x) + x_pad]
     y_range = [min(all_y) - y_pad, max(all_y) + y_pad]
 
-    print(f"  Widest level: {max_nodes_per_level} nodes → canvas {fig_width}x{fig_height}px")
+    print(f"  Leaf nodes: {n_leaves} → canvas {fig_width}x{fig_height}px")
 
     # Create edge traces
     edge_trace = []
@@ -591,8 +598,9 @@ def main(cfg: DictConfig):
     fig.add_annotation(
         text=(
             "<b>Architecture:</b><br>"
-            "• Storage Zone: Zone → Aisle → Object OR Zone → Shelf → Section → Object<br>"
-            "• Other Zones: Zone → Object (direct assignment)<br>"
+            "• Non-storage zones: Zone → Object (direct — open floor, no aisles)<br>"
+            "• Storage (on shelf): Zone → Aisle → Shelf → Section → Object<br>"
+            "• Storage (in walkway): Zone → Aisle → Object<br>"
             "<i>Hover over nodes for details. Click and drag to pan. Scroll to zoom.</i>"
         ),
         xref="paper", yref="paper",

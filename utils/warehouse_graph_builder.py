@@ -2,11 +2,21 @@
 Warehouse Graph Builder for TierGraph
 
 Implements hierarchical scene graph construction for warehouse environments.
-Assigns objects to a 5-level hierarchy: Zone → Aisle → Shelf → Section → Object
+Assigns objects to the warehouse hierarchy using geometric containment checks.
 
 Unlike OpenGraph's flat MST-based scene graph, TierGraph uses fixed warehouse
-geometry to assign objects to their hierarchical locations via geometric
-containment checks.
+geometry to determine each object's precise location.
+
+Hierarchy varies by zone type:
+
+  Non-storage zones (receiving, packing, forklift, etc.):
+    Zone → Object   (direct — these are open floor areas with no aisles/shelves)
+
+  Storage zone only:
+    Zone → Aisle → Shelf → Section → Object  (full path, object on shelf level)
+    Zone → Aisle → Shelf → Object            (object in shelf area, no section match)
+    Zone → Aisle → Object                    (object in aisle walkway)
+    Zone → Object                            (fallback — in storage but unmatched)
 
 Author: awang (TierGraph thesis)
 Date: 2026-02-10
@@ -38,12 +48,20 @@ class WarehouseGraphBuilder:
     """
     Builds hierarchical scene graph for warehouse environments.
 
-    The hierarchy is:
-        Zone (functional areas like storage, receiving, packing)
-         └─ Aisle (corridors between shelves)
-             └─ Shelf (shelving units)
-                 └─ Section (tiers/levels on a shelf)
-                     └─ Object (detected items from OpenGraph)
+    Aisles and shelves exist ONLY in the storage zone.
+    Non-storage zones (receiving, packing, forklift, hub_robot, general)
+    are open floor areas — objects there attach directly to the zone node.
+
+    Storage zone hierarchy:
+        zone_storage
+         └─ Aisle (corridors between shelf rows)
+             └─ Shelf (shelving units, children of their adjacent aisle)
+                 └─ Section (vertical tiers on a shelf)
+                     └─ Object
+
+    Non-storage zone hierarchy:
+        zone_receiving / zone_packing / zone_forklift / ...
+         └─ Object  (direct — no aisle or shelf intermediaries)
     """
 
     def __init__(self, warehouse_layout_path: str):
@@ -76,8 +94,11 @@ class WarehouseGraphBuilder:
             )
             self.nodes[zone_node.id] = zone_node
 
-            # Add aisles within this zone
-            if 'aisles' in zone_data and zone_data['aisles']:
+            # Add aisles within this zone.
+            # Aisles are corridors between shelf rows — they exist ONLY in the
+            # storage zone.  Non-storage zones (receiving, packing, forklift,
+            # etc.) are open floor areas and never contain aisles.
+            if zone_data['id'] == 'zone_storage' and 'aisles' in zone_data and zone_data['aisles']:
                 for aisle_id, aisle_data in zone_data['aisles'].items():
                     aisle_node = HierarchyNode(
                         id=aisle_data['id'],
@@ -201,8 +222,15 @@ class WarehouseGraphBuilder:
         return None
 
     def find_containing_shelf(self, point: np.ndarray, aisle_id: Optional[str], zone_id: str) -> Optional[str]:
-        """Find which shelf contains the point (check aisle first, then zone)."""
-        # Check shelves in aisle
+        """Find which shelf contains the point.
+
+        If aisle_id is given, restrict the search to that aisle's shelves.
+        If aisle_id is None, search all shelves reachable from zone_id —
+        both direct children of the zone and children of its aisles.
+        Shelves in zone_storage are always under aisles (never direct zone
+        children), so the aisle traversal is essential for the storage zone.
+        """
+        # Specific aisle given — check only that aisle's shelves
         if aisle_id:
             aisle_node = self.nodes.get(aisle_id)
             if aisle_node:
@@ -210,14 +238,26 @@ class WarehouseGraphBuilder:
                     child = self.nodes.get(child_id)
                     if child and child.type == 'shelf' and self.point_in_bounds(point, child.bounds):
                         return child_id
+            return None
 
-        # Check shelves directly in zone
+        # No aisle given: walk zone → aisles → shelves (and any direct zone shelves)
         zone_node = self.nodes.get(zone_id)
-        if zone_node:
-            for child_id in zone_node.children:
-                child = self.nodes.get(child_id)
-                if child and child.type == 'shelf' and self.point_in_bounds(point, child.bounds):
-                    return child_id
+        if not zone_node:
+            return None
+
+        for child_id in zone_node.children:
+            child = self.nodes.get(child_id)
+            if child is None:
+                continue
+            # Shelf directly under the zone (rare — only if no adjacent aisle)
+            if child.type == 'shelf' and self.point_in_bounds(point, child.bounds):
+                return child_id
+            # Normal case: shelf is a child of an aisle
+            if child.type == 'aisle':
+                for grandchild_id in child.children:
+                    grandchild = self.nodes.get(grandchild_id)
+                    if grandchild and grandchild.type == 'shelf' and self.point_in_bounds(point, grandchild.bounds):
+                        return grandchild_id
 
         return None
 

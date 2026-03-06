@@ -180,10 +180,23 @@ def main(cfg: DictConfig):
     import os
     os.unlink(temp_layout_path)
 
+    # Geometric structural filter using warehouse layout geometry.
+    #
+    # Walls:  centroid XY is outside the warehouse floor polygon
+    #         (the floor polygon gives the building boundary in robot-relative XY).
+    # Floor:  centroid Z < FLOOR_Z_THRESHOLD after the +0.781m Z offset.
+    #         Zone bounds start at Z=0.0 after layout alignment, so floor-level
+    #         objects end up at Z ≈ 0–0.3m in centroid space.
+    from matplotlib.path import Path as MplPath
+    floor_vertices = np.array(aligned_layout['floor']['vertices'])  # (N, 2) XY
+    floor_polygon = MplPath(floor_vertices)
+    FLOOR_Z_THRESHOLD = 0.4  # metres; centroids below this are floor tiles
+
     # Assign each OpenGraph object to the hierarchy
     print(f"\nAssigning {len(objects)} objects to warehouse hierarchy...")
     assigned_count = 0
     unassigned_count = 0
+    filtered_count = 0
 
     for i, obj in enumerate(objects):
         # Extract object data
@@ -208,6 +221,26 @@ def main(cfg: DictConfig):
             if all_captions:
                 caption = all_captions[i % len(all_captions)]
 
+        # Geometric structural filter: skip walls and floor tiles
+        centroid_xy = centroid[:2]
+        if not floor_polygon.contains_point(centroid_xy):
+            print(f"  [FILTERED wall]  object_{i}: XY={centroid_xy} outside warehouse polygon")
+            filtered_count += 1
+            continue
+        if centroid[2] < FLOOR_Z_THRESHOLD:
+            # Exempt objects that fall inside a non-General functional zone —
+            # they could be low pallets or boxes sitting on the floor.
+            in_functional_zone = any(
+                zone['id'] != 'zone_general'
+                and zone['bounds']['min']['x'] <= centroid[0] <= zone['bounds']['max']['x']
+                and zone['bounds']['min']['y'] <= centroid[1] <= zone['bounds']['max']['y']
+                for zone in aligned_layout['functional_zones']
+            )
+            if not in_functional_zone:
+                print(f"  [FILTERED floor] object_{i}: Z={centroid[2]:.3f}m below threshold, not in functional zone")
+                filtered_count += 1
+                continue
+
         # Assign to hierarchy
         success, path = builder.assign_object_to_hierarchy(
             object_id=object_id,
@@ -225,7 +258,8 @@ def main(cfg: DictConfig):
             print(f"  [WARNING] Could not assign object {i}: {caption[:30]} at {centroid}")
 
     print(f"\nAssignment complete:")
-    print(f"  Assigned: {assigned_count} / {len(objects)} objects")
+    print(f"  Filtered (structural): {filtered_count} objects")
+    print(f"  Assigned: {assigned_count} / {len(objects) - filtered_count} remaining objects")
     print(f"  Unassigned: {unassigned_count} objects")
 
     # Process background objects (if any)
