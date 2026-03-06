@@ -718,7 +718,10 @@ def detect_functional_zones(floor_polygon: Dict,
     fy_min = floor_bounds['min']['y']
     fy_max = floor_bounds['max']['y']
 
-    claimed_aisle_ids: set = set()
+    # Aisles are corridors between shelf rows and belong exclusively to the
+    # storage zone.  Non-storage zones (receiving, packing, forklift, etc.)
+    # are open floor areas — they never contain aisles.
+    # Only shelves (and their sections) can appear in non-storage zones.
     claimed_shelf_ids: set = set()
 
     # --- 1. Receiving Area ---
@@ -745,13 +748,7 @@ def detect_functional_zones(floor_polygon: Dict,
         if rx_max > rx_min and ry_max > ry_min:
             has_receiving = True
 
-            recv_aisles = []
-            for aisle in aisles:
-                ac = aisle['bounds']['center']
-                if _point_in_rect(ac['x'], ac['y'], rx_min, ry_min, rx_max, ry_max):
-                    recv_aisles.append(aisle['id'])
-                    claimed_aisle_ids.add(aisle['id'])
-
+            # No aisles in receiving zone — it is open floor only.
             recv_shelves = []
             for shelf in shelves:
                 sc = shelf['bounds']['center']
@@ -768,7 +765,7 @@ def detect_functional_zones(floor_polygon: Dict,
             zones.append(_make_zone_dict(
                 'zone_receiving', 'Receiving Area', 'receiving',
                 recv_vertices, recv_area,
-                receiving_wall['name'], recv_aisles, recv_shelves
+                receiving_wall['name'], [], recv_shelves
             ))
 
     # --- 2. Packing Area (bounded by floor tape) ---
@@ -787,15 +784,7 @@ def detect_functional_zones(floor_polygon: Dict,
         if px_max > px_min and py_max > py_min:
             has_packing = True
 
-            pack_aisles = []
-            for aisle in aisles:
-                if aisle['id'] in claimed_aisle_ids:
-                    continue
-                ac = aisle['bounds']['center']
-                if _point_in_rect(ac['x'], ac['y'], px_min, py_min, px_max, py_max):
-                    pack_aisles.append(aisle['id'])
-                    claimed_aisle_ids.add(aisle['id'])
-
+            # No aisles in packing zone — it is open floor only.
             pack_shelves = []
             for shelf in shelves:
                 if shelf['id'] in claimed_shelf_ids:
@@ -814,7 +803,7 @@ def detect_functional_zones(floor_polygon: Dict,
             zones.append(_make_zone_dict(
                 'zone_packing', 'Packing Area', 'packing',
                 pack_vertices, pack_area,
-                None, pack_aisles, pack_shelves
+                None, [], pack_shelves
             ))
 
     # --- 3. Tape Zones (ReflectiveTape-bounded areas) ---
@@ -833,16 +822,7 @@ def detect_functional_zones(floor_polygon: Dict,
 
         tape_zone_rects.append((tz_x_min, tz_y_min, tz_x_max, tz_y_max))
 
-        tz_aisles = []
-        for aisle in aisles:
-            if aisle['id'] in claimed_aisle_ids:
-                continue
-            ac = aisle['bounds']['center']
-            if _point_in_rect(ac['x'], ac['y'],
-                              tz_x_min, tz_y_min, tz_x_max, tz_y_max):
-                tz_aisles.append(aisle['id'])
-                claimed_aisle_ids.add(aisle['id'])
-
+        # No aisles in tape zones (pallet truck, hub robot, forklift areas).
         tz_shelves = []
         for shelf in shelves:
             if shelf['id'] in claimed_shelf_ids:
@@ -862,12 +842,14 @@ def detect_functional_zones(floor_polygon: Dict,
         zones.append(_make_zone_dict(
             tz['zone_id'], tz['name'], tz['type'],
             tz_vertices, tz_area,
-            None, tz_aisles, tz_shelves
+            None, [], tz_shelves
         ))
 
     # --- 4. Storage Area (bounding box of all shelves + aisles) ---
     # Storage zone is defined as the EXACT axis-aligned bounding box of all
     # shelves and aisles, with no expansion to include corridors.
+    # ALL aisles belong to the storage zone — aisles are corridors between
+    # shelf rows and are only meaningful in the storage zone context.
     has_storage = False
     sx_min = sx_max = sy_min = sy_max = 0.0
     all_bounds = []
@@ -885,14 +867,8 @@ def detect_functional_zones(floor_polygon: Dict,
 
         has_storage = True
 
-        stor_aisles = []
-        for aisle in aisles:
-            if aisle['id'] in claimed_aisle_ids:
-                continue
-            ac = aisle['bounds']['center']
-            if _point_in_rect(ac['x'], ac['y'], sx_min, sy_min, sx_max, sy_max):
-                stor_aisles.append(aisle['id'])
-                claimed_aisle_ids.add(aisle['id'])
+        # All aisles go to storage zone — no other zone claims aisles.
+        stor_aisles = [a['id'] for a in aisles]
 
         stor_shelves = []
         for shelf in shelves:
@@ -916,7 +892,7 @@ def detect_functional_zones(floor_polygon: Dict,
         ))
 
     # --- 5. General Area (floor minus all other zones) ---
-    gen_aisles = [a['id'] for a in aisles if a['id'] not in claimed_aisle_ids]
+    # General zone is residual open floor — no aisles, only unclaimed shelves.
     gen_shelves = [s['id'] for s in shelves if s['id'] not in claimed_shelf_ids]
 
     try:
@@ -972,7 +948,7 @@ def detect_functional_zones(floor_polygon: Dict,
     zones.append(_make_zone_dict(
         'zone_general', 'General', 'general',
         gen_vertices, gen_area,
-        None, gen_aisles, gen_shelves
+        None, [], gen_shelves
     ))
 
     return zones
