@@ -117,7 +117,7 @@ def get_hierarchical_colors(obj_map, num_objects):
         'zone_packing': (0.9, 0.2, 0.9),       # Alias for zone_staging (legacy tiergraph results)
         'zone_pallet_truck': (0.9, 0.9, 0.2), # Yellow
         'zone_hub_robot': (0.2, 0.7, 0.9),    # Cyan
-        'zone_forklift': (0.9, 0.6, 0.3),     # Brown
+        'zone_forklift': (0.85, 0.1, 0.1),    # Red
         'zone_general': (0.5, 0.5, 0.5),      # Gray
     }
 
@@ -766,7 +766,7 @@ def main(cfg: DictConfig):
         'zone_packing': ([0.8, 0.0, 0.8], [1.0, 0.4, 1.0]),        # Alias for zone_staging (legacy)
         'zone_pallet_truck': ([0.8, 0.8, 0.0], [1.0, 1.0, 0.3]), # Dark yellow / Light yellow
         'zone_hub_robot': ([0.0, 0.6, 0.8], [0.3, 0.8, 1.0]),    # Dark cyan / Light cyan
-        'zone_forklift': ([0.8, 0.5, 0.2], [1.0, 0.7, 0.4]),     # Dark brown / Light brown
+        'zone_forklift': ([0.7, 0.0, 0.0], [1.0, 0.3, 0.3]),     # Dark red / Light red
         'zone_general': ([0.4, 0.4, 0.4], [0.6, 0.6, 0.6]),      # Dark gray / Light gray
     }
 

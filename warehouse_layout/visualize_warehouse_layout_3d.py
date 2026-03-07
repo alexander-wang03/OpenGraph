@@ -117,7 +117,7 @@ def visualize_3d_layout(
         'staging': ('plum', 'purple'),
         'pallet_truck': ('lightyellow', 'goldenrod'),
         'hub_robot': ('lightcyan', 'darkcyan'),
-        'forklift': ('peachpuff', 'sienna'),
+        'forklift': ('lightcoral', 'firebrick'),
         'storage': ('lightskyblue', 'steelblue'),
         'general': ('palegreen', 'darkgreen')
     }
@@ -276,7 +276,7 @@ def visualize_multi_view(
         'staging': ('plum', 'purple'),
         'pallet_truck': ('lightyellow', 'goldenrod'),
         'hub_robot': ('lightcyan', 'darkcyan'),
-        'forklift': ('peachpuff', 'sienna'),
+        'forklift': ('lightcoral', 'firebrick'),
         'storage': ('lightskyblue', 'steelblue'),
         'general': ('palegreen', 'darkgreen')
     }
