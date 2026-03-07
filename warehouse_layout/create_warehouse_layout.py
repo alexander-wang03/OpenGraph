@@ -220,8 +220,8 @@ def parse_asset_by_name(csv_path: Path, name: str) -> Optional[Dict]:
     return None
 
 
-def parse_packing_tapes(csv_path: Path) -> List[Dict]:
-    """Extract packing zone boundary tapes (C04 long side + C02 short side)."""
+def parse_staging_tapes(csv_path: Path) -> List[Dict]:
+    """Extract staging zone boundary tapes (C04 long side + C02 short side)."""
     tapes = []
     long_pattern = re.compile(
         r'^/World/full_warehouse/VinylMessageTape8M75MM_C04_PR_NVD_\d+$')
@@ -254,12 +254,12 @@ def parse_packing_tapes(csv_path: Path) -> List[Dict]:
     return tapes
 
 
-def compute_packing_zone_bounds(
+def compute_staging_zone_bounds(
     tapes: List[Dict]
 ) -> Optional[Tuple[float, float, float, float]]:
     """
     Compute rectangular (px_min, py_min, px_max, py_max) from the outer
-    envelope of all packing boundary tapes.  Gaps in the tape boundary
+    envelope of all staging boundary tapes.  Gaps in the tape boundary
     (entry/exit points) do not reduce the rectangle.
 
     Returns None if no tapes are found.
@@ -692,7 +692,7 @@ def _make_zone_dict(zone_id: str, name: str, zone_type: str,
 
 def detect_functional_zones(floor_polygon: Dict,
                             receiving_wall: Optional[Dict],
-                            packing_bounds: Optional[Tuple[float, float, float, float]],
+                            staging_bounds: Optional[Tuple[float, float, float, float]],
                             identified_tape_zones: List[Dict],
                             aisles: List[Dict],
                             shelves: List[Dict]) -> List[Dict]:
@@ -701,7 +701,7 @@ def detect_functional_zones(floor_polygon: Dict,
 
     Zones (in priority order for claiming aisles/shelves):
     1. Receiving Area:  XY area from the sm_wall_a01_01 bounding box, clipped to floor
-    2. Packing Area:    XY rectangle from boundary tape outer bounding box
+    2. Staging Area:    XY rectangle from boundary tape outer bounding box
     3. Tape Zones:      ReflectiveTape-bounded zones (Pallet Truck, Hub Robot, Forklift)
     4. Storage Area:    merged XY bounding box of all shelves and aisles
     5. General:         floor area minus all other zones
@@ -719,7 +719,7 @@ def detect_functional_zones(floor_polygon: Dict,
     fy_max = floor_bounds['max']['y']
 
     # Aisles are corridors between shelf rows and belong exclusively to the
-    # storage zone.  Non-storage zones (receiving, packing, forklift, etc.)
+    # storage zone.  Non-storage zones (receiving, staging, forklift, etc.)
     # are open floor areas — they never contain aisles.
     # Only shelves (and their sections) can appear in non-storage zones.
     claimed_shelf_ids: set = set()
@@ -768,12 +768,12 @@ def detect_functional_zones(floor_polygon: Dict,
                 receiving_wall['name'], [], recv_shelves
             ))
 
-    # --- 2. Packing Area (bounded by floor tape) ---
-    has_packing = False
+    # --- 2. Staging Area (bounded by floor tape) ---
+    has_staging = False
     px_min = px_max = py_min = py_max = 0.0
 
-    if packing_bounds is not None:
-        px_min, py_min, px_max, py_max = packing_bounds
+    if staging_bounds is not None:
+        px_min, py_min, px_max, py_max = staging_bounds
 
         # Clip to floor bounds
         px_min = max(px_min, fx_min)
@@ -782,9 +782,9 @@ def detect_functional_zones(floor_polygon: Dict,
         py_max = min(py_max, fy_max)
 
         if px_max > px_min and py_max > py_min:
-            has_packing = True
+            has_staging = True
 
-            # No aisles in packing zone — it is open floor only.
+            # No aisles in staging zone — it is open floor only.
             pack_shelves = []
             for shelf in shelves:
                 if shelf['id'] in claimed_shelf_ids:
@@ -801,7 +801,7 @@ def detect_functional_zones(floor_polygon: Dict,
             pack_area = (px_max - px_min) * (py_max - py_min)
 
             zones.append(_make_zone_dict(
-                'zone_packing', 'Packing Area', 'packing',
+                'zone_staging', 'Staging Area', 'staging',
                 pack_vertices, pack_area,
                 None, [], pack_shelves
             ))
@@ -902,7 +902,7 @@ def detect_functional_zones(floor_polygon: Dict,
         if has_receiving:
             floor_shape = floor_shape.difference(
                 shapely_box(rx_min, ry_min, rx_max, ry_max))
-        if has_packing:
+        if has_staging:
             floor_shape = floor_shape.difference(
                 shapely_box(px_min, py_min, px_max, py_max))
         for tz_rect in tape_zone_rects:
@@ -940,7 +940,7 @@ def detect_functional_zones(floor_polygon: Dict,
         ]
         floor_area = (fx_max - fx_min) * (fy_max - fy_min)
         recv_area_val = (rx_max - rx_min) * (ry_max - ry_min) if has_receiving else 0.0
-        pack_area_val = (px_max - px_min) * (py_max - py_min) if has_packing else 0.0
+        pack_area_val = (px_max - px_min) * (py_max - py_min) if has_staging else 0.0
         tape_area_val = sum((r[2] - r[0]) * (r[3] - r[1]) for r in tape_zone_rects)
         stor_area_val = (sx_max - sx_min) * (sy_max - sy_min) if has_storage else 0.0
         gen_area = floor_area - recv_area_val - pack_area_val - tape_area_val - stor_area_val
@@ -1798,7 +1798,7 @@ def create_warehouse_layout(csv_path: Path, output_json_path: Optional[Path] = N
 
     Hierarchy:
     - Floor
-      - Functional Zones (Receiving, Packing, Pallet Truck, Hub Robot, Forklift, Storage, General)
+      - Functional Zones (Receiving, Staging, Pallet Truck, Hub Robot, Forklift, Storage, General)
         - Aisles
           - Shelves
             - Shelf Sections
@@ -1810,8 +1810,8 @@ def create_warehouse_layout(csv_path: Path, output_json_path: Optional[Path] = N
     rack_shelves = parse_rack_shelves(csv_path)
     rack_frames = parse_rack_frames(csv_path)
     receiving_wall = parse_asset_by_name(csv_path, 'sm_wall_a01_01')
-    packing_tapes = parse_packing_tapes(csv_path)
-    packing_bounds = compute_packing_zone_bounds(packing_tapes)
+    staging_tapes = parse_staging_tapes(csv_path)
+    staging_bounds = compute_staging_zone_bounds(staging_tapes)
     reflective_tapes = parse_reflective_tapes(csv_path)
     tape_zone_rects = detect_tape_zones(reflective_tapes)
     zone_indicators = parse_zone_indicator_assets(csv_path)
@@ -1869,7 +1869,7 @@ def create_warehouse_layout(csv_path: Path, output_json_path: Optional[Path] = N
 
     # Detect functional zones
     functional_zones = detect_functional_zones(
-        floor_polygon, receiving_wall, packing_bounds,
+        floor_polygon, receiving_wall, staging_bounds,
         identified_tape_zones, aisles, shelves)
 
     # Add functional_zone reference to each aisle and shelf
@@ -1912,7 +1912,7 @@ def create_warehouse_layout(csv_path: Path, output_json_path: Optional[Path] = N
             'rackshelf_count': len(rack_shelves),
             'rackframe_count': len(rack_frames),
             'aislesign_count': len(aisle_signs),
-            'packing_tape_count': len(packing_tapes),
+            'packing_tape_count': len(staging_tapes),
             'reflective_tape_count': len(reflective_tapes),
             'tape_zone_count': len(identified_tape_zones),
             'functional_zone_count': len(functional_zones),

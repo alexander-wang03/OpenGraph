@@ -11,7 +11,7 @@
 TierGraph extends OpenGraph with a hierarchical 5-level scene graph structure designed specifically for warehouse environments:
 
 ```
-Zone (Storage, Receiving, Packing, etc.)
+Zone (Storage, Receiving, Staging, etc.)
  └─ Aisle (Corridors between shelves)
      └─ Shelf (Shelving units)
          └─ Section (Tiers/levels on shelves)
@@ -100,7 +100,7 @@ Saves PNG: `results/warehouse_{sequence}/pcd/tiergraph_hierarchy.png`
 
 **For each OpenGraph object** (with 3D centroid from point cloud):
 
-1. **Find containing Zone**: Check which functional zone (storage/receiving/packing) contains the point
+1. **Find containing Zone**: Check which functional zone (storage/receiving/staging) contains the point
 2. **Find containing Aisle**: Check which aisle (corridor) in that zone contains the point
 3. **Find containing Shelf**: Check which shelving unit contains the point
 4. **Find containing Section**: Check which section (tier/level) on that shelf contains the point
@@ -123,7 +123,7 @@ Contains:
 Path: `Isaac-sim-husky-navigation/src/isaaccomponentspython/Data/warehouse_layout.json`
 
 Contains:
-- 7 functional zones (storage, receiving, packing, etc.)
+- 7 functional zones (storage, receiving, staging, etc.)
 - 6 aisles in storage zone
 - 7 shelves in storage zone
 - 118 sections (tiers) across all shelves
@@ -184,7 +184,7 @@ All sequences collected with fixed IsaacDataset (no Tr transform on poses).
    - Clean baseline comparison (OpenGraph and TierGraph get identical detections)
 
 3. **5-Level Hierarchy**: Explicit warehouse structure
-   - Zone: Functional areas (storage, receiving, packing)
+   - Zone: Functional areas (storage, receiving, staging)
    - Aisle: Corridors between shelves
    - Shelf: Shelving units
    - Section: Tiers/levels on shelves (height-based)

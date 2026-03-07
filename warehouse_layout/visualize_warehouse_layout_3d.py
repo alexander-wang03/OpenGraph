@@ -114,7 +114,7 @@ def visualize_3d_layout(
     # Zone color mapping
     zone_colors = {
         'receiving': ('sandybrown', 'saddlebrown'),
-        'packing': ('plum', 'purple'),
+        'staging': ('plum', 'purple'),
         'pallet_truck': ('lightyellow', 'goldenrod'),
         'hub_robot': ('lightcyan', 'darkcyan'),
         'forklift': ('peachpuff', 'sienna'),
@@ -273,7 +273,7 @@ def visualize_multi_view(
     # Zone color mapping
     zone_colors = {
         'receiving': ('sandybrown', 'saddlebrown'),
-        'packing': ('plum', 'purple'),
+        'staging': ('plum', 'purple'),
         'pallet_truck': ('lightyellow', 'goldenrod'),
         'hub_robot': ('lightcyan', 'darkcyan'),
         'forklift': ('peachpuff', 'sienna'),

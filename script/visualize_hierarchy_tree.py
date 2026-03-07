@@ -6,7 +6,7 @@ Creates an interactive 2D hierarchical tree diagram showing the warehouse struct
 
 Actual hierarchy (from warehouse_graph_builder.py):
 
-  Non-storage zones (receiving, packing, forklift, hub_robot, general):
+  Non-storage zones (receiving, staging, forklift, hub_robot, general):
     Zone → Object   (direct — these are open floor areas, no aisles or shelves)
 
   Storage zone only:
@@ -267,7 +267,7 @@ def get_node_color(node_type, zone_id=None):
     zone_colors = {
         'zone_storage': '#00B300',      # Green
         'zone_receiving': '#E68000',    # Orange
-        'zone_packing': '#E600E6',      # Magenta
+        'zone_staging': '#E600E6',      # Magenta
         'zone_pallet_truck': '#E6E600', # Yellow
         'zone_hub_robot': '#33B8E6',    # Cyan
         'zone_forklift': '#E69933',     # Brown

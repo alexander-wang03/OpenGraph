@@ -18,7 +18,7 @@ Located in `../data/warehouse_layout/`:
 The layout JSON contains a 5-level hierarchy:
 ```
 Floor
-└── Functional Zones (Receiving, Packing, Storage, Pallet Truck, Hub Robot, Forklift, General)
+└── Functional Zones (Receiving, Staging, Storage, Pallet Truck, Hub Robot, Forklift, General)
     ├── Aisles (corridors between shelves)
     │   └── Shelves (racking units)
     │       └── Sections (vertical tiers: bottom, intermediate, top)

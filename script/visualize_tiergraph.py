@@ -113,7 +113,8 @@ def get_hierarchical_colors(obj_map, num_objects):
     zone_base_colors = {
         'zone_storage': (0.0, 0.7, 0.0),      # Green
         'zone_receiving': (0.9, 0.5, 0.1),    # Orange
-        'zone_packing': (0.9, 0.2, 0.9),      # Magenta
+        'zone_staging': (0.9, 0.2, 0.9),       # Magenta
+        'zone_packing': (0.9, 0.2, 0.9),       # Alias for zone_staging (legacy tiergraph results)
         'zone_pallet_truck': (0.9, 0.9, 0.2), # Yellow
         'zone_hub_robot': (0.2, 0.7, 0.9),    # Cyan
         'zone_forklift': (0.9, 0.6, 0.3),     # Brown
@@ -213,7 +214,7 @@ def print_color_legend(obj_map, objects):
     print("  Zone boxes:    Colored wireframe boundaries")
     print("    - Storage zone:    Green (has shelf/aisle hierarchy)")
     print("    - Receiving:       Orange")
-    print("    - Packing:         Magenta")
+    print("    - Staging:         Magenta")
     print("    - Pallet Truck:    Yellow")
     print("    - Hub Robot:       Cyan")
     print("    - Forklift:        Brown")
@@ -228,7 +229,7 @@ def print_color_legend(obj_map, objects):
     print("  Point clouds colored by zone assignment:")
     print("    - Storage zone objects:  Green shades")
     print("    - Receiving zone:        Orange shades")
-    print("    - Packing zone:          Magenta shades")
+    print("    - Staging zone:          Magenta shades")
     print("    - Pallet Truck zone:     Yellow shades")
     print("    - Hub Robot zone:        Cyan shades")
     print("    - Forklift zone:         Brown shades")
@@ -761,7 +762,8 @@ def main(cfg: DictConfig):
     zone_color_map = {
         'zone_storage': ([0.0, 0.8, 0.0], [0.2, 1.0, 0.2]),      # Dark green / Light green
         'zone_receiving': ([0.8, 0.4, 0.0], [1.0, 0.6, 0.2]),    # Dark orange / Light orange
-        'zone_packing': ([0.8, 0.0, 0.8], [1.0, 0.4, 1.0]),      # Dark magenta / Light magenta
+        'zone_staging': ([0.8, 0.0, 0.8], [1.0, 0.4, 1.0]),        # Dark magenta / Light magenta
+        'zone_packing': ([0.8, 0.0, 0.8], [1.0, 0.4, 1.0]),        # Alias for zone_staging (legacy)
         'zone_pallet_truck': ([0.8, 0.8, 0.0], [1.0, 1.0, 0.3]), # Dark yellow / Light yellow
         'zone_hub_robot': ([0.0, 0.6, 0.8], [0.3, 0.8, 1.0]),    # Dark cyan / Light cyan
         'zone_forklift': ([0.8, 0.5, 0.2], [1.0, 0.7, 0.4]),     # Dark brown / Light brown

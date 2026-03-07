@@ -9,7 +9,7 @@ geometry to determine each object's precise location.
 
 Hierarchy varies by zone type:
 
-  Non-storage zones (receiving, packing, forklift, etc.):
+  Non-storage zones (receiving, staging, forklift, etc.):
     Zone → Object   (direct — these are open floor areas with no aisles/shelves)
 
   Storage zone only (aisles and shelves are sibling children of the zone):
@@ -49,7 +49,7 @@ class WarehouseGraphBuilder:
     Builds hierarchical scene graph for warehouse environments.
 
     Aisles and shelves exist ONLY in the storage zone.
-    Non-storage zones (receiving, packing, forklift, hub_robot, general)
+    Non-storage zones (receiving, staging, forklift, hub_robot, general)
     are open floor areas — objects there attach directly to the zone node.
 
     Storage zone hierarchy (aisles and shelves are siblings under the zone):
@@ -60,7 +60,7 @@ class WarehouseGraphBuilder:
                  └─ Object
 
     Non-storage zone hierarchy:
-        zone_receiving / zone_packing / zone_forklift / ...
+        zone_receiving / zone_staging / zone_forklift / ...
          └─ Object  (direct — no aisle or shelf intermediaries)
     """
 
@@ -96,7 +96,7 @@ class WarehouseGraphBuilder:
 
             # Add aisles within this zone.
             # Aisles are corridors between shelf rows — they exist ONLY in the
-            # storage zone.  Non-storage zones (receiving, packing, forklift,
+            # storage zone.  Non-storage zones (receiving, staging, forklift,
             # etc.) are open floor areas and never contain aisles.
             if zone_data['id'] == 'zone_storage' and 'aisles' in zone_data and zone_data['aisles']:
                 for aisle_id, aisle_data in zone_data['aisles'].items():
