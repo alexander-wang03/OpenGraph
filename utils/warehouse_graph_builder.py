@@ -27,6 +27,7 @@ import numpy as np
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 from dataclasses import dataclass
+from matplotlib.path import Path as MplPath
 
 
 @dataclass
@@ -75,6 +76,7 @@ class WarehouseGraphBuilder:
         self.layout_data = self._load_layout()
         self.nodes = {}  # id -> HierarchyNode
         self.edges = []  # List of (parent_id, child_id, edge_type)
+        self.zone_polygons = {}  # zone_id -> MplPath (polygon containment for non-AABB zones)
         self._build_infrastructure()
 
     def _load_layout(self) -> Dict:
@@ -93,6 +95,12 @@ class WarehouseGraphBuilder:
                 bounds=zone_data['bounds']
             )
             self.nodes[zone_node.id] = zone_node
+
+            # Store polygon for zones that have explicit vertices (e.g. zone_storage,
+            # which is a rotated rectangle — its AABB is inflated and would cause
+            # false-positive containment for points outside the actual polygon).
+            if 'vertices' in zone_data and zone_data['vertices']:
+                self.zone_polygons[zone_data['id']] = MplPath(np.array(zone_data['vertices']))
 
             # Add aisles within this zone.
             # Aisles are corridors between shelf rows — they exist ONLY in the
@@ -180,6 +188,19 @@ class WarehouseGraphBuilder:
 
         return True
 
+    def point_in_zone(self, point: np.ndarray, zone_id: str) -> bool:
+        """
+        Check if a point is inside a zone, using polygon containment when
+        polygon vertices are available (accurate for rotated zones) and falling
+        back to AABB otherwise.
+        """
+        node = self.nodes.get(zone_id)
+        if not node:
+            return False
+        if zone_id in self.zone_polygons:
+            return self.zone_polygons[zone_id].contains_point(point[:2])
+        return self.point_in_bounds(point, node.bounds)
+
     def find_containing_zone(self, point: np.ndarray) -> Optional[str]:
         """
         Find which zone contains the given point.
@@ -187,15 +208,18 @@ class WarehouseGraphBuilder:
         Priority order: Check all non-General zones first, then General as fallback.
         This prevents objects from being assigned to General when they're actually
         in a more specific zone (since General's bounds may overlap other zones).
+
+        Uses polygon containment for zones with explicit vertices (avoids AABB
+        inflation errors for rotated zones like zone_storage).
         """
         # First pass: check all non-General zones
         for node in self.nodes.values():
-            if node.type == 'zone' and node.id != 'zone_general' and self.point_in_bounds(point, node.bounds):
+            if node.type == 'zone' and node.id != 'zone_general' and self.point_in_zone(point, node.id):
                 return node.id
 
         # Second pass: check General zone as fallback
         for node in self.nodes.values():
-            if node.type == 'zone' and node.id == 'zone_general' and self.point_in_bounds(point, node.bounds):
+            if node.type == 'zone' and node.id == 'zone_general' and self.point_in_zone(point, node.id):
                 return node.id
 
         return None
