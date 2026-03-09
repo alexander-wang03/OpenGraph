@@ -10,12 +10,12 @@ Actual hierarchy (from warehouse_graph_builder.py):
     Zone → Object   (direct — these are open floor areas, no aisles or shelves)
 
   Storage zone only:
-    Infrastructure:  Zone → Aisle → Shelf → Section
-                     Zone → Shelf → Section  (rare: shelf with no adjacent aisle)
+    Infrastructure:  Zone → Aisle          (corridors between shelves)
+                     Zone → Shelf → Section
 
     Object assignment (4 cases, storage zone only):
-    1. On shelf with section → Zone → Aisle → Shelf → Section → Object (full depth)
-    2. On shelf, no section  → Zone → Aisle → Shelf → Object
+    1. On shelf with section → Zone → Shelf → Section → Object (full depth)
+    2. On shelf, no section  → Zone → Shelf → Object
     3. In aisle walkway      → Zone → Aisle → Object
     4. Unmatched (fallback)  → Zone → Object
 
@@ -596,8 +596,10 @@ def main(cfg: DictConfig):
         text=(
             "<b>Architecture:</b><br>"
             "• Non-storage zones: Zone → Object (direct — open floor, no aisles)<br>"
-            "• Storage (on shelf): Zone → Aisle → Shelf → Section → Object<br>"
+            "• Storage (on shelf + section): Zone → Shelf → Section → Object<br>"
+            "• Storage (on shelf, no section): Zone → Shelf → Object<br>"
             "• Storage (in walkway): Zone → Aisle → Object<br>"
+            "• Storage (fallback): Zone → Object<br>"
             "<i>Hover over nodes for details. Click and drag to pan. Scroll to zoom.</i>"
         ),
         xref="paper", yref="paper",

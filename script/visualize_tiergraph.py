@@ -210,7 +210,7 @@ def print_color_legend(obj_map, objects):
     print("="*60)
     print("\nInfrastructure:")
     print("  Floor:         Dark gray mesh")
-    print("  Zone floors:   Semi-transparent colored polygons")
+    print("  Zone floors:   Transparent (not rendered)")
     print("  Zone boxes:    Colored wireframe boundaries")
     print("    - Storage zone:    Green (has shelf/aisle hierarchy)")
     print("    - Receiving:       Orange")
@@ -745,15 +745,7 @@ def main(cfg: DictConfig):
     # Create infrastructure bounding boxes from ORIGINAL warehouse layout
     print("Creating infrastructure visualization...")
 
-    # 1. Create floor mesh
-    floor_mesh = create_floor_mesh(
-        warehouse_layout['floor']['vertices'],
-        floor_z=-0.14,
-        color=[0.3, 0.3, 0.3]
-    )
-    print(f"  Created floor mesh with {len(warehouse_layout['floor']['vertices'])} vertices")
-
-    # 2. Create zone floor polygons and bounding boxes
+    # 1. Create zone floor polygons and bounding boxes
     zone_boxes = []
     zone_floor_meshes = []
     zone_labels = []
@@ -797,19 +789,21 @@ def main(cfg: DictConfig):
 
         # Create zone floor polygon with progressive Z offset to avoid z-fighting
         zone_verts = zone.get('vertices', [])
-        if zone_verts:
+        if zone_verts and len(zone_verts) >= 3 and zone_id != 'zone_general':
             # Each zone gets a unique Z offset (storage zone gets lowest to be most visible)
             if zone_id == 'zone_storage':
                 z_offset = 0.001  # Storage zone closest to actual floor
             else:
                 z_offset = 0.01 + (zone_idx * zone_floor_z_offset)
 
+            # Blend dark wireframe color with light fill color (70/30) for a more solid floor
+            solid_color = [0.7 * wireframe_color[j] + 0.3 * fill_color[j] for j in range(3)]
             zone_floor = create_floor_mesh(
                 zone_verts,
                 floor_z=min_z + z_offset,
-                color=fill_color
+                color=solid_color
             )
-            zone_floor.paint_uniform_color(fill_color)
+            zone_floor.paint_uniform_color(solid_color)
             zone_floor_meshes.append((zone_floor, zone_id))
 
         # Create zone bounding box wireframe (thick lines)
@@ -957,10 +951,7 @@ def main(cfg: DictConfig):
 
     # 6. Build infra_geometries list for TierGraphViewer
     infra = []
-    infra.append(("floor_mesh", floor_mesh, "defaultUnlit"))
-
-    for zone_floor, zid in zone_floor_meshes:
-        infra.append((f"zone_floor_{zid}", zone_floor, "defaultUnlit"))
+    # Gray floor mesh intentionally not added (hidden)
 
     for zone_lineset, zid, _ in zone_boxes:
         infra.append((f"zone_box_{zid}", zone_lineset, "unlitLine"))
