@@ -6,7 +6,7 @@ This version visualizes the warehouse layout in the original Isaac Sim global
 frame, making it match the warehouse_layout.json visualization. Point clouds
 are transformed from robot frame back to global frame.
 
-Click on a white centroid sphere to highlight the associated point cloud.
+Click on a orange centroid sphere to highlight the associated point cloud.
 Press Esc to deselect.
 
 Usage:
@@ -224,7 +224,7 @@ def print_color_legend(obj_map, objects):
     print("  Sections:      Yellow/orange wireframe (storage zone only)")
 
     print(f"\nObjects (total: {len(objects)}):")
-    print("  Centroid markers: Small white spheres (click to highlight)")
+    print("  Centroid markers: Small orange spheres (click to highlight)")
     print("  Boundaries:       White wireframe boxes")
     print("  Point clouds colored by zone assignment:")
     print("    - Storage zone objects:  Green shades")
@@ -340,7 +340,7 @@ class TierGraphViewer:
     """
     Interactive TierGraph viewer with click-to-highlight support.
 
-    Click a white centroid sphere to highlight the selected object's point
+    Click a orange centroid sphere to highlight the selected object's point
     cloud (shows original RGB) and dim all others.  Press Esc to deselect.
     """
 
@@ -376,7 +376,7 @@ class TierGraphViewer:
 
         # ---------- info label overlaid at the top ----------
         self.info_label = gui.Label(
-            "Click a white centroid sphere to inspect an object    |    Esc = deselect")
+            "Click a orange centroid sphere to inspect an object    |    Esc = deselect")
 
         panel = gui.Horiz(0, gui.Margins(int(0.5 * em), int(0.3 * em),
                                          int(0.5 * em), int(0.3 * em)))
@@ -455,7 +455,7 @@ class TierGraphViewer:
 
             m_normal = o3d.geometry.TriangleMesh.create_sphere(radius=self.SPHERE_RADIUS)
             m_normal.translate(c)
-            m_normal.paint_uniform_color([1.0, 1.0, 1.0])
+            m_normal.paint_uniform_color([1.0, 0.5, 0.0])   # bright orange
             m_normal.compute_vertex_normals()
 
             m_sel = o3d.geometry.TriangleMesh.create_sphere(radius=self.SPHERE_RADIUS * 1.5)
@@ -477,7 +477,7 @@ class TierGraphViewer:
         print("\n" + "="*60)
         print("VISUALIZATION READY")
         print("="*60)
-        print("Click a white centroid sphere to inspect an object")
+        print("Click a orange centroid sphere to inspect an object")
         print("Press Esc to deselect  |  Close window to exit")
         print("="*60 + "\n")
 
@@ -626,7 +626,7 @@ class TierGraphViewer:
         for i in range(self.n):
             self._swap_obj(i, 'normal', 'normal')
         self.info_label.text = (
-            "Click a white centroid sphere to inspect an object    |    Esc = deselect")
+            "Click a orange centroid sphere to inspect an object    |    Esc = deselect")
         self._scene.force_redraw()
 
     def _update_info(self, idx):
