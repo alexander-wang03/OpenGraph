@@ -1,0 +1,38 @@
+# ============================================================
+# Information Bottleneck compression config for TierGraph
+# ============================================================
+#
+# delta:      merge stopping threshold.
+#             Lower  (0.05) = finer granularity, more clusters retained.
+#             Higher (0.30) = coarser compression, fewer clusters.
+#             Recommended range: 0.10 – 0.25.
+#
+# sims_thres: null-task floor probability.
+#             Objects whose best task similarity is below this floor are
+#             treated as task-irrelevant and merged aggressively.
+#             Recommended range: 0.15 – 0.30.
+#
+# top_k_tasks: number of top-scoring tasks to consider per object.
+#              1 = crisp single-task focus.  2+ = soft multi-task.
+#
+# tasks: list of natural-language task queries.
+#        Features are encoded with the same SBERT model used by OpenGraph
+#        (sentence-transformers/all-MiniLM-L6-v2) so they are in the same
+#        embedding space as the object 'ft' features.
+# ============================================================
+
+delta:        0.15
+sims_thres:   0.20
+top_k_tasks:  1
+cumulative:   false
+use_lerf_loss: false
+lerf_loss_cannonical_phrases: []
+
+# Warehouse-relevant task queries for the thesis evaluation.
+# Edit or extend these to match your query experiments.
+tasks:
+  - "find a cardboard box"
+  - "locate a package or parcel"
+  - "identify products on a shelf"
+  - "find storage bins or containers"
+  - "locate items on a pallet"

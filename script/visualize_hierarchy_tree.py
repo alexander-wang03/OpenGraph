@@ -280,6 +280,7 @@ def get_node_color(node_type, zone_id=None):
         'shelf': '#4169E1',     # Royal Blue
         'section': '#FFA500',   # Orange
         'object': '#90EE90',    # Light Green
+        'cluster': '#FF00FF',   # Magenta — IB-compressed cluster
     }
 
     if node_type == 'zone' and zone_id:
@@ -296,6 +297,7 @@ def get_node_size(node_type):
         'shelf': 20,
         'section': 15,
         'object': 10,
+        'cluster': 18,   # larger than objects so clusters are easy to spot
     }
     return sizes.get(node_type, 10)
 
@@ -322,14 +324,23 @@ def main(cfg: DictConfig):
 
     # Load object captions from OpenGraph results
     result_path = Path(cfg.result_path)
-    object_captions = load_object_captions(result_path, stats['nodes_by_type']['object'])
+    # Use original_object_count from compression metadata if available, else fall back
+    n_objects = (
+        tiergraph.get('metadata', {}).get('compression', {}).get('original_object_count')
+        or stats['nodes_by_type'].get('object', 0)
+    )
+    object_captions = load_object_captions(result_path, n_objects)
+    n_clusters = stats['nodes_by_type'].get('cluster', 0)
+    is_compressed = n_clusters > 0
     print(f"  Total nodes: {stats['total_nodes']}")
     print(f"  Total edges: {stats['total_edges']}")
     print(f"  Zones: {stats['nodes_by_type']['zone']}")
     print(f"  Aisles: {stats['nodes_by_type'].get('aisle', 0)}")
     print(f"  Shelves: {stats['nodes_by_type'].get('shelf', 0)}")
     print(f"  Sections: {stats['nodes_by_type'].get('section', 0)}")
-    print(f"  Objects: {stats['nodes_by_type']['object']}")
+    print(f"  Objects: {stats['nodes_by_type'].get('object', 0)}")
+    if is_compressed:
+        print(f"  IB Clusters: {n_clusters}  (compressed TierGraph)")
 
     # Build NetworkX graph
     print("\nBuilding hierarchy tree...")
@@ -337,6 +348,7 @@ def main(cfg: DictConfig):
 
     # Add nodes with attributes
     node_data = {}
+    node_lookup = {n['id']: n for n in tiergraph['nodes']}
     for node in tiergraph['nodes']:
         G.add_node(node['id'])
 
@@ -345,11 +357,18 @@ def main(cfg: DictConfig):
         if node['type'] == 'object' and node['id'] in object_captions:
             node_name = object_captions[node['id']]
 
+        extra = {}
+        if node['type'] == 'cluster':
+            meta = node.get('metadata', {})
+            extra['member_count'] = meta.get('member_count', 0)
+            extra['member_ids'] = meta.get('member_ids', [])
+
         node_data[node['id']] = {
             'type': node['type'],
             'name': node_name,
             'id': node['id'],
-            'original_name': node['name']  # Keep original for reference
+            'original_name': node['name'],
+            **extra,
         }
 
     # Add edges
@@ -475,11 +494,15 @@ def main(cfg: DictConfig):
         node_traces[node_type]['text'].append(display_name)
 
         # Hover information (full details)
-        if node_type == 'object':
-            hover_text = f"<b>🏷️ {node_data[node]['name']}</b><br>"
+        ndat = node_data[node]
+        if node_type == 'cluster':
+            hover_text = f"<b>🔀 IB Cluster: {ndat['name']}</b><br>"
+            hover_text += f"<i>Type: cluster ({ndat.get('member_count', '?')} merged objects)</i><br>"
+        elif node_type == 'object':
+            hover_text = f"<b>🏷️ {ndat['name']}</b><br>"
             hover_text += f"<i>Type: {node_type}</i><br>"
         else:
-            hover_text = f"<b>{node_data[node]['name']}</b><br>"
+            hover_text = f"<b>{ndat['name']}</b><br>"
             hover_text += f"Type: {node_type}<br>"
 
         hover_text += f"ID: {node}<br>"
@@ -491,6 +514,13 @@ def main(cfg: DictConfig):
             hover_text += f"Parent: {parents[0]}<br>"
         if children:
             hover_text += f"Children: {len(children)}<br>"
+
+        # Cluster: list merged members
+        if node_type == 'cluster' and ndat.get('member_ids'):
+            hover_text += f"<br><b>Merged members:</b><br>"
+            for mid in ndat['member_ids']:
+                caption = object_captions.get(mid, mid)
+                hover_text += f"  • {mid}: {caption}<br>"
 
         # Add hierarchy path for objects
         if node_type == 'object' and parents:
@@ -542,12 +572,18 @@ def main(cfg: DictConfig):
     fig = go.Figure(data=traces)
 
     # Update layout with better defaults for large graphs
-    title_text = f'TierGraph Hierarchy - Sequence {cfg.sequence}<br>'
+    label = 'TierGraph Hierarchy (IB-Compressed)' if is_compressed else 'TierGraph Hierarchy'
+    title_text = f'{label} - Sequence {cfg.sequence}<br>'
     title_text += f'<sub>{stats["nodes_by_type"]["zone"]} Zones | '
     title_text += f'{stats["nodes_by_type"].get("aisle", 0)} Aisles | '
     title_text += f'{stats["nodes_by_type"].get("shelf", 0)} Shelves | '
     title_text += f'{stats["nodes_by_type"].get("section", 0)} Sections | '
-    title_text += f'{stats["nodes_by_type"]["object"]} Objects</sub>'
+    title_text += f'{stats["nodes_by_type"].get("object", 0)} Objects'
+    if is_compressed:
+        comp = tiergraph.get('metadata', {}).get('compression', {})
+        orig = comp.get('original_object_count', '?')
+        title_text += f' | <b style="color:magenta">{n_clusters} IB Clusters</b> (from {orig} objects)'
+    title_text += '</sub>'
 
     fig.update_layout(
         title=dict(
