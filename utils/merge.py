@@ -213,10 +213,10 @@ def caption_merge(cfg, objects: MapObjectList):
         max_seq_len=cfg.llama_max_seq_len,
         max_batch_size=cfg.llama_max_batch_size,
     )
-    # 用作示范的prompt example
-    caption_example1 = "a car parked on the street, a car parked on the street, a white car parked on the street, a car parked on the street, a black car parked on the street, a white car parked on the street, a white car on the road, a mirror of a white car"
-    caption_example2 = "a red and white sign, a red and white sign, a red and white sign, a red and white sign, a red and white sign, a red and white sign, a red and white sign"
-    caption_example3 = "a triangular street sign, the back of a triangular sign"
+    # Warehouse-specific few-shot examples for the prompt
+    caption_example1 = "a yellow and black machine, a yellow and black toy truck, a yellow vehicle with forks, a yellow lifting machine, a yellow and black forklift, a yellow industrial vehicle"
+    caption_example2 = "a brown cardboard box, a cardboard box on a shelf, a brown box, a cardboard box, a corrugated cardboard box, a brown cardboard box on a shelf"
+    caption_example3 = "a tall metal pole, a metal upright, a metal shelf support, a vertical metal beam, a metal pole on a shelf"
 
     for i in trange(len(objects)):
         caption_obj = objects[i]["caption"]
@@ -231,19 +231,21 @@ def caption_merge(cfg, objects: MapObjectList):
                 caption_obj = caption_obj[num_last_comma_index + 2:]
             # 生成llama对话
             dialogs: List[Dialog] = [
-                [{"role": "system", 
-                "content": "You are a phrase summarizer who can summarize a most complete phrase that best represents \
-                them from a sequence of phrases separated by commas, including as much effective information, adjective \
-                and elements as possible without severe conflicting. \
-                You only need to produce a string of summarized phrase.\
+                [{"role": "system",
+                "content": "You are a warehouse inventory assistant. Summarize the following object descriptions \
+                into a single warehouse-specific phrase. Use warehouse terminology where possible \
+                (e.g. 'pallet truck', 'cardboard box', 'wire reel', 'shelf upright', 'hand truck', \
+                'forklift', 'pallet', 'storage bin', 'fire extinguisher', 'safety sign'). \
+                Include color and size if distinctive. Do not guess objects from non-warehouse contexts. \
+                You only need to produce a string of summarized phrase. \
                 Please produce nothing else!!!!!!!! Only one phrase. \
                 The output format is: 'Summarized parase: [[your summarized parase itself]]'"}
                 ,{"role": "user", "content": caption_example1}
-                ,{"role": "assistant", "content": "Summarized parase: [a white car parked on the street]"}
+                ,{"role": "assistant", "content": "Summarized parase: [yellow pallet truck]"}
                 ,{"role": "user", "content": caption_example2}
-                ,{"role": "assistant", "content": "Summarized parase: [a red and white sign]"}
+                ,{"role": "assistant", "content": "Summarized parase: [cardboard box on shelf]"}
                 ,{"role": "user", "content": caption_example3}
-                ,{"role": "assistant", "content": "Summarized parase: [the back of a triangular street sign]"}
+                ,{"role": "assistant", "content": "Summarized parase: [metal shelf upright]"}
                 ,{"role": "user", "content": caption_obj}],
             ]
 
@@ -257,11 +259,18 @@ def caption_merge(cfg, objects: MapObjectList):
             # 读取llama回答结果中的generation content作为caption融合结果
             for dialog, result in zip(dialogs, results):
                 input_text = result["generation"]["content"]
-                pattern = r'\[([^]]+)\]'  # 匹配方括号中的内容
-                match = re.search(pattern, input_text)
-                extracted_content = []
+                # Match only the bracket that follows "Summarized parase:" to avoid
+                # capturing LLaMA instruction tokens like [INST]
+                pattern = r'Summarized parase:\s*\[([^\]]+)\]'
+                match = re.search(pattern, input_text, re.IGNORECASE)
                 if match:
                     extracted_content = match.group(1)
+                else:
+                    # Fallback: use the last [bracket] in the response, skipping INST artifacts
+                    all_matches = re.findall(r'\[([^\]]+)\]', input_text)
+                    artifacts = {"INST", "/INST", "SYS", "/SYS"}
+                    valid = [m for m in all_matches if m.strip() not in artifacts]
+                    extracted_content = valid[-1] if valid else caption_obj.split(', ')[0]
                 objects[i]["caption"] = extracted_content
     return objects, generator
 

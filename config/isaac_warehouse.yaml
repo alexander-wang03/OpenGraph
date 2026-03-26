@@ -49,7 +49,7 @@ llama_ckpt_dir: '/home/awang/Documents/TRAILbot/third_parties/weights/Llama-2-7b
 llama_tokenizer_path: '/home/awang/Documents/TRAILbot/third_parties/weights/Llama-2-7b/tokenizer.model'
 llama_max_seq_len: 512
 llama_max_batch_size: 8
-caption_merge_ft: !!bool False                     # Disable Llama caption merging (saves GPU memory)
+caption_merge_ft: !!bool True                     # Disable Llama caption merging (saves GPU memory)
 
 # Map saving and post-processing
 save_pcd: !!bool True
