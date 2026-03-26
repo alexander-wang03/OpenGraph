@@ -191,6 +191,8 @@ def main(cfg: DictConfig):
     floor_vertices = np.array(aligned_layout['floor']['vertices'])  # (N, 2) XY
     floor_polygon = MplPath(floor_vertices)
     FLOOR_Z_THRESHOLD = 0.4  # metres; centroids below this are floor tiles
+    MAX_EXTENT_THRESHOLD = 5.0  # metres; objects larger than this in any axis
+                                # are structural (walls, ceilings, floor slabs)
 
     # Assign each OpenGraph object to the hierarchy
     print(f"\nAssigning {len(objects)} objects to warehouse hierarchy...")
@@ -238,6 +240,19 @@ def main(cfg: DictConfig):
             )
             if not in_functional_zone:
                 print(f"  [FILTERED floor] object_{i}: Z={centroid[2]:.3f}m below threshold, not in functional zone")
+                filtered_count += 1
+                continue
+
+        # Extent filter: reject objects whose bounding box exceeds the
+        # threshold in any axis — these are walls, ceilings, or floor slabs
+        # that passed the centroid-based filters above.
+        points = np.asarray(pcd.points)
+        if len(points) > 0:
+            extent = points.max(axis=0) - points.min(axis=0)
+            max_extent = extent.max()
+            if max_extent > MAX_EXTENT_THRESHOLD:
+                print(f"  [FILTERED extent] object_{i}: max extent {max_extent:.1f}m > {MAX_EXTENT_THRESHOLD}m "
+                      f"({extent[0]:.1f} x {extent[1]:.1f} x {extent[2]:.1f})")
                 filtered_count += 1
                 continue
 

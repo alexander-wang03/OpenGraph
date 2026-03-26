@@ -411,13 +411,16 @@ class TierGraphViewer:
 
         # ---------- infrastructure geometries (static) ----------
         for name, geom, shader in infra_geometries:
-            mat = rendering.MaterialRecord()
-            mat.shader = shader
-            if shader == "unlitLine":
-                mat.line_width = 1.5
-            elif shader == "defaultLit":
-                mat.shader = "defaultLit"
-            self._scene.scene.add_geometry(name, geom, mat)
+            try:
+                mat = rendering.MaterialRecord()
+                mat.shader = shader
+                if shader == "unlitLine":
+                    mat.line_width = 1.5
+                elif shader == "defaultLit":
+                    mat.shader = "defaultLit"
+                self._scene.scene.add_geometry(name, geom, mat)
+            except RuntimeError as e:
+                print(f"  [WARNING] Could not add {name}: {e}")
 
         # ---------- per-object geometry ----------
         # Store all variants as instance variables; only the 'normal' variant
@@ -430,45 +433,49 @@ class TierGraphViewer:
         for i in range(self.n):
             pcd = pcds[i]
 
-            if len(pcd.points) == 0:
+            if len(pcd.points) == 0 or centroids[i] is None:
                 self._obj_state[i] = 'empty'
                 continue
 
-            # PCDs
-            pcd_normal = copy.deepcopy(pcd)
-            pcd_normal.paint_uniform_color(instance_colors[i])
+            try:
+                # PCDs
+                pcd_normal = copy.deepcopy(pcd)
+                pcd_normal.paint_uniform_color(instance_colors[i])
 
-            # Highlighted: blend instance color 60% toward white
-            base = np.array(instance_colors[i])
-            lighter = base + (1.0 - base) * 0.6
-            lighter = np.clip(lighter, 0.0, 1.0)
-            pcd_hl = copy.deepcopy(pcd)
-            pcd_hl.paint_uniform_color(lighter.tolist())
+                # Highlighted: blend instance color 60% toward white
+                base = np.array(instance_colors[i])
+                lighter = base + (1.0 - base) * 0.6
+                lighter = np.clip(lighter, 0.0, 1.0)
+                pcd_hl = copy.deepcopy(pcd)
+                pcd_hl.paint_uniform_color(lighter.tolist())
 
-            self._pcd_variants[i] = {
-                'normal':      pcd_normal,
-                'highlighted': pcd_hl,
-            }
+                self._pcd_variants[i] = {
+                    'normal':      pcd_normal,
+                    'highlighted': pcd_hl,
+                }
 
-            # Markers
-            c = centroids[i]
+                # Markers
+                c = centroids[i]
 
-            m_normal = o3d.geometry.TriangleMesh.create_sphere(radius=self.SPHERE_RADIUS)
-            m_normal.translate(c)
-            m_normal.paint_uniform_color([1.0, 0.5, 0.0])   # bright orange
-            m_normal.compute_vertex_normals()
+                m_normal = o3d.geometry.TriangleMesh.create_sphere(radius=self.SPHERE_RADIUS)
+                m_normal.translate(c)
+                m_normal.paint_uniform_color([1.0, 0.5, 0.0])   # bright orange
+                m_normal.compute_vertex_normals()
 
-            m_sel = o3d.geometry.TriangleMesh.create_sphere(radius=self.SPHERE_RADIUS * 1.5)
-            m_sel.translate(c)
-            m_sel.paint_uniform_color([1.0, 0.85, 0.0])
-            m_sel.compute_vertex_normals()
+                m_sel = o3d.geometry.TriangleMesh.create_sphere(radius=self.SPHERE_RADIUS * 1.5)
+                m_sel.translate(c)
+                m_sel.paint_uniform_color([1.0, 0.85, 0.0])
+                m_sel.compute_vertex_normals()
 
-            self._marker_variants[i] = {'normal': m_normal, 'selected': m_sel}
+                self._marker_variants[i] = {'normal': m_normal, 'selected': m_sel}
 
-            # Add only the normal variant to the scene initially
-            self._scene.scene.add_geometry(f"pcd_{i}",    pcd_normal, self._pcd_mat)
-            self._scene.scene.add_geometry(f"marker_{i}", m_normal,   self._mesh_mat)
-            self._obj_state[i] = 'normal'
+                # Add only the normal variant to the scene initially
+                self._scene.scene.add_geometry(f"pcd_{i}",    pcd_normal, self._pcd_mat)
+                self._scene.scene.add_geometry(f"marker_{i}", m_normal,   self._mesh_mat)
+                self._obj_state[i] = 'normal'
+            except RuntimeError as e:
+                print(f"  [WARNING] Could not add object {i} to scene: {e}")
+                self._obj_state[i] = 'empty'
 
         # ---------- initial camera ----------
         bounds = self._scene.scene.bounding_box
@@ -737,6 +744,29 @@ def main(cfg: DictConfig):
     # Build object hierarchy mapping
     print("\nBuilding hierarchical color scheme...")
     obj_hierarchy_map = build_object_hierarchy_map(tiergraph)
+
+    # Determine which object indices are in the TierGraph (not filtered by
+    # wall/floor filter in build_tiergraph.py).  Objects NOT in the TierGraph
+    # will be replaced with empty point clouds so they don't render.
+    tiergraph_obj_indices = set()
+    for obj_id in obj_hierarchy_map:
+        parts = obj_id.split('_')
+        if parts[0] == 'object' and len(parts) == 2:
+            try:
+                tiergraph_obj_indices.add(int(parts[1]))
+            except ValueError:
+                pass
+
+    n_filtered = 0
+    for i in range(len(pcds)):
+        if i not in tiergraph_obj_indices:
+            # Replace with empty pcd so the viewer skips it
+            pcds[i] = o3d.geometry.PointCloud()
+            n_filtered += 1
+
+    print(f"  {len(tiergraph_obj_indices)} objects in TierGraph, "
+          f"{n_filtered} filtered objects hidden")
+
     instance_colors = get_hierarchical_colors(obj_hierarchy_map, len(objects))
 
     # Print color legend
@@ -868,9 +898,11 @@ def main(cfg: DictConfig):
 
     print(f"  Created {len(aisle_boxes)} aisles + {len(shelf_boxes)} shelf/section boxes")
 
-    # 4. Create object bounding boxes
+    # 4. Create object bounding boxes (only for TierGraph objects)
     object_boxes = []
     for i, pcd in enumerate(pcds):
+        if i not in tiergraph_obj_indices:
+            continue
         if len(pcd.points) > 0:
             # Compute axis-aligned bounding box from point cloud
             points = np.asarray(pcd.points)
@@ -892,6 +924,9 @@ def main(cfg: DictConfig):
     # 5. Compute centroids (for click-to-highlight picking)
     centroids = []
     for i, obj in enumerate(objects):
+        if i not in tiergraph_obj_indices:
+            centroids.append(None)
+            continue
         if len(obj['pcd'].points) > 0:
             points_robot = np.asarray(obj['pcd'].points)
             if has_first_pose:
@@ -910,18 +945,21 @@ def main(cfg: DictConfig):
     print("\n" + "="*60)
     print("OBJECT LABELS & HIERARCHY")
     print("="*60)
-    for i, (obj_id, assignment) in enumerate(obj_hierarchy_map.items()):
-        obj = objects[i]
+    for obj_id, assignment in obj_hierarchy_map.items():
+        parts = obj_id.split('_')
+        if parts[0] != 'object' or len(parts) != 2:
+            continue
+        try:
+            i = int(parts[1])
+        except ValueError:
+            continue
+        if i >= len(objects):
+            continue
 
-        # Get centroid position
-        points_robot = np.asarray(obj['pcd'].points)
-        if has_first_pose:
-            points_global = transform_points_to_global(points_robot, T_first)
-            points_global[:, 2] += Z_OFFSET
-        else:
-            points_global = points_robot.copy()
-            points_global[:, 2] += Z_OFFSET
-        centroid = points_global.mean(axis=0)
+        obj = objects[i]
+        c = centroids[i]
+        if c is None:
+            continue
 
         # Get hierarchy path
         path_parts = []
@@ -942,7 +980,7 @@ def main(cfg: DictConfig):
         color_hex = f"RGB({color[0]:.2f}, {color[1]:.2f}, {color[2]:.2f})"
 
         print(f"{obj_id}:")
-        print(f"  Position: ({centroid[0]:.2f}, {centroid[1]:.2f}, {centroid[2]:.2f})")
+        print(f"  Position: ({c[0]:.2f}, {c[1]:.2f}, {c[2]:.2f})")
         print(f"  Color: {color_hex}")
         print(f"  Hierarchy: {hierarchy_path}")
         print()
