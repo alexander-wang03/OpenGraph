@@ -191,7 +191,7 @@ def main(cfg: DictConfig):
     floor_vertices = np.array(aligned_layout['floor']['vertices'])  # (N, 2) XY
     floor_polygon = MplPath(floor_vertices)
     FLOOR_Z_THRESHOLD = 0.4  # metres; centroids below this are floor tiles
-    MAX_EXTENT_THRESHOLD = 5.0  # metres; objects larger than this in any axis
+    MAX_EXTENT_THRESHOLD = 6.0  # metres; objects larger than this in any axis
                                 # are structural (walls, ceilings, floor slabs)
 
     # Assign each OpenGraph object to the hierarchy

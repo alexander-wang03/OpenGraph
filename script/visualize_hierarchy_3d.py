@@ -326,6 +326,137 @@ def edges_to_lineset(edges: list) -> o3d.geometry.LineSet:
 
 
 # ---------------------------------------------------------------------------
+# Warehouse boundary helpers (shared logic with visualize_tiergraph.py)
+# ---------------------------------------------------------------------------
+
+def create_bbox_lineset(bounds, color=[1, 0, 0]):
+    """Create Open3D lineset for a bounding box."""
+    min_pt = bounds['min']
+    max_pt = bounds['max']
+    min_z = min_pt.get('z', 0.0)
+    max_z = max_pt.get('z', 3.0)
+
+    corners = np.array([
+        [min_pt['x'], min_pt['y'], min_z],
+        [max_pt['x'], min_pt['y'], min_z],
+        [max_pt['x'], max_pt['y'], min_z],
+        [min_pt['x'], max_pt['y'], min_z],
+        [min_pt['x'], min_pt['y'], max_z],
+        [max_pt['x'], min_pt['y'], max_z],
+        [max_pt['x'], max_pt['y'], max_z],
+        [min_pt['x'], max_pt['y'], max_z],
+    ])
+
+    lines = [
+        [0, 1], [1, 2], [2, 3], [3, 0],  # Bottom
+        [4, 5], [5, 6], [6, 7], [7, 4],  # Top
+        [0, 4], [1, 5], [2, 6], [3, 7],  # Vertical
+    ]
+
+    lineset = o3d.geometry.LineSet()
+    lineset.points = o3d.utility.Vector3dVector(corners)
+    lineset.lines = o3d.utility.Vector2iVector(lines)
+    lineset.colors = o3d.utility.Vector3dVector([color] * len(lines))
+    return lineset
+
+
+def create_floor_mesh(floor_vertices, floor_z=-0.14, color=[0.5, 0.5, 0.5]):
+    """Create Open3D mesh for floor polygon."""
+    vertices_3d = []
+    for v in floor_vertices:
+        if isinstance(v, (list, tuple)):
+            vertices_3d.append([v[0], v[1], floor_z])
+        else:
+            vertices_3d.append([v['x'], v['y'], floor_z])
+
+    vertices_3d = np.array(vertices_3d)
+
+    num_vertices = len(vertices_3d)
+    triangles = []
+    for i in range(1, num_vertices - 1):
+        triangles.append([0, i, i + 1])
+
+    mesh = o3d.geometry.TriangleMesh()
+    mesh.vertices = o3d.utility.Vector3dVector(vertices_3d)
+    mesh.triangles = o3d.utility.Vector3iVector(triangles)
+    mesh.paint_uniform_color(color)
+    mesh.compute_vertex_normals()
+    return mesh
+
+
+ZONE_COLOR_MAP = {
+    'zone_storage':      ([0.0, 0.8, 0.0], [0.2, 1.0, 0.2]),
+    'zone_receiving':    ([0.8, 0.4, 0.0], [1.0, 0.6, 0.2]),
+    'zone_staging':      ([0.8, 0.0, 0.8], [1.0, 0.4, 1.0]),
+    'zone_packing':      ([0.8, 0.0, 0.8], [1.0, 0.4, 1.0]),
+    'zone_pallet_truck': ([0.8, 0.8, 0.0], [1.0, 1.0, 0.3]),
+    'zone_hub_robot':    ([0.0, 0.6, 0.8], [0.3, 0.8, 1.0]),
+    'zone_forklift':     ([0.7, 0.0, 0.0], [1.0, 0.3, 0.3]),
+    'zone_general':      ([0.4, 0.4, 0.4], [0.6, 0.6, 0.6]),
+}
+
+
+def build_warehouse_boundaries(warehouse_layout):
+    """Build zone/aisle/shelf boundary geometries from warehouse_layout.json.
+
+    Returns a list of Open3D geometries (linesets + floor meshes).
+    """
+    geometries = []
+    zone_floor_z_offset = 0.005
+
+    for zone_idx, zone in enumerate(warehouse_layout['functional_zones']):
+        zone_id = zone['id']
+        wireframe_color, fill_color = ZONE_COLOR_MAP.get(
+            zone_id, ([0.5, 0.5, 0.5], [0.7, 0.7, 0.7]))
+
+        min_z = -0.14
+        max_z = -0.14
+
+        shelves = zone.get('shelves', {})
+        if isinstance(shelves, dict):
+            for shelf in shelves.values():
+                shelf_max_z = shelf['bounds']['max'].get('z', min_z)
+                max_z = max(max_z, shelf_max_z)
+
+        if max_z == min_z:
+            max_z = min_z + 0.5
+
+        # Zone bounding box wireframe
+        zone_bounds = {
+            'min': {'x': zone['bounds']['min']['x'],
+                    'y': zone['bounds']['min']['y'], 'z': min_z},
+            'max': {'x': zone['bounds']['max']['x'],
+                    'y': zone['bounds']['max']['y'], 'z': max_z},
+        }
+        geometries.append(create_bbox_lineset(zone_bounds, wireframe_color))
+
+        # Aisle + shelf + section boxes (storage zone only)
+        if zone_id == 'zone_storage':
+            aisles = zone.get('aisles', {})
+            if isinstance(aisles, dict):
+                for aisle in aisles.values():
+                    geometries.append(
+                        create_bbox_lineset(aisle['bounds'], [0.9, 0.9, 0.0]))
+
+            if isinstance(shelves, dict):
+                for shelf in shelves.values():
+                    geometries.append(
+                        create_bbox_lineset(shelf['bounds'], [0.2, 0.4, 1.0]))
+                    sections = shelf.get('sections', {})
+                    if isinstance(sections, dict):
+                        for level_dict in sections.values():
+                            if isinstance(level_dict, dict):
+                                for section in level_dict.values():
+                                    if isinstance(section, dict) and 'bounds' in section:
+                                        geometries.append(
+                                            create_bbox_lineset(
+                                                section['bounds'],
+                                                [1.0, 0.8, 0.0]))
+
+    return geometries
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
@@ -351,6 +482,13 @@ def main(cfg: DictConfig):
     print(f"Loading objects from {result_path}...")
     objects = load_objects(result_path)
     print(f"  {len(objects)} objects in full_pcd")
+
+    warehouse_layout_path = (
+        Path(__file__).parent.parent / "data" / "warehouse_layout" / "warehouse_layout.json"
+    )
+    print(f"Loading warehouse layout from {warehouse_layout_path}...")
+    with open(warehouse_layout_path, 'r') as f:
+        warehouse_layout = json.load(f)
 
     T_first = load_absolute_first_pose(sequence_dir)
     has_first_pose = not np.allclose(T_first, np.eye(4))
@@ -389,6 +527,12 @@ def main(cfg: DictConfig):
     # Add edges
     if edge_lineset is not None:
         geometries.append(edge_lineset)
+
+    # Add warehouse/zone boundaries
+    print("Creating warehouse boundary visualization...")
+    boundary_geoms = build_warehouse_boundaries(warehouse_layout)
+    geometries.extend(boundary_geoms)
+    print(f"  Added {len(boundary_geoms)} boundary geometries")
 
     # Add coordinate frame
     coord_frame = o3d.geometry.TriangleMesh.create_coordinate_frame(

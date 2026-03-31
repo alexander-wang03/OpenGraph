@@ -500,6 +500,14 @@ class TierGraphViewer:
         return gui.Widget.EventCallbackResult.IGNORED
 
     def _on_mouse(self, event):
+        # Consume ALL mouse events when Ctrl/Meta is held to prevent
+        # Open3D's internal picking handler from crashing
+        # (RuntimeError: Unable to cast Python instance to C++ type).
+        has_ctrl = (event.is_modifier_down(gui.KeyModifier.CTRL)
+                    or event.is_modifier_down(gui.KeyModifier.META))
+        if has_ctrl:
+            return gui.Widget.EventCallbackResult.HANDLED
+
         if event.type == gui.MouseEvent.Type.BUTTON_DOWN:
             if event.buttons & int(gui.MouseButton.LEFT):
                 self._click_start = (event.x, event.y)

@@ -39,6 +39,45 @@ from utils.coordinate_alignment import load_absolute_first_pose
 
 # Zone keyword mapping: query text patterns → zone IDs
 # When a query mentions one of these, restrict hierarchical search to that zone
+# ---------------------------------------------------------------------------
+# TAP-feasible query filter
+# ---------------------------------------------------------------------------
+# Queries requiring fine-grained label reading, text recognition, or
+# identification of small wall-mounted items are beyond TAP's visual
+# segmentation capability.  We exclude them for the "filtered" evaluation.
+
+TAP_EXCLUDE_PATTERNS = [
+    # Text/label reading required
+    'labeled "Digital Twin"',
+    "labeled 'Digital Twin'",
+    '"EQP" symbol',
+    '"UNK" symbol',
+    "star-shaped symbol",
+    "FRAGILE labeled",
+    # Small wall-mounted items (not reliably segmented by TAP)
+    "first aid kit",
+    "disinfectant",
+    "flashlight",
+    "fire extinguisher",
+    # Small indistinguishable items
+    "small bottles",
+    # Structural features (not objects)
+    "electrical box",
+    "dock-high doors",
+]
+
+
+def is_tap_feasible(question: str) -> bool:
+    """Return True if the query targets visually distinct objects that
+    TAP can reasonably segment and caption (no label reading, no tiny
+    wall-mounted items)."""
+    q_lower = question.lower()
+    for pattern in TAP_EXCLUDE_PATTERNS:
+        if pattern.lower() in q_lower:
+            return False
+    return True
+
+
 ZONE_KEYWORDS = {
     "zone_staging": [
         "staging area", "staging zone", "packing area", "packing zone",
@@ -368,7 +407,9 @@ def main(cfg: DictConfig):
     result_path = Path(cfg.result_path)
     tiergraph_path = Path(cfg.scenegraph_path)
     sequence_dir = Path(cfg.basedir) / cfg.sequence
-    query_csv = "/home/awang/Documents/TRAILbot/Warehouse Task List.xlsx - Isaac sim.csv"
+    query_csv = str(
+        Path(__file__).parent.parent / "data" / "warehouse_layout" / "warehouse_task_list.csv"
+    )
     output_dir = tiergraph_path.parent
     output_csv = output_dir / "retrieval_results.csv"
 
@@ -426,6 +467,14 @@ def main(cfg: DictConfig):
     all_gt_queries = queries  # all queries with GT positions
     print(f"  {len(position_queries)} position-type queries")
     print(f"  {len(all_gt_queries)} total queries with GT positions (all types)")
+
+    # Tag each query as TAP-feasible or not
+    for q in position_queries:
+        q["tap_feasible"] = is_tap_feasible(q["question"])
+    n_feasible = sum(1 for q in position_queries if q["tap_feasible"])
+    n_excluded = len(position_queries) - n_feasible
+    print(f"  {n_feasible} TAP-feasible queries, {n_excluded} excluded "
+          f"(label reading / fine-grained / structural)")
 
     # --- Oracle analysis: which queries even have a nearby object? ---
     print("\n--- Oracle Analysis ---")
@@ -488,6 +537,7 @@ def main(cfg: DictConfig):
             "query_idx": qi,
             "question": query["question"],
             "query_type": query["query_type"],
+            "tap_feasible": int(query.get("tap_feasible", True)),
             "gt_global_x": query["gt_global"][0],
             "gt_global_y": query["gt_global"][1],
             "gt_global_z": query["gt_global"][2],
@@ -550,6 +600,58 @@ def main(cfg: DictConfig):
             hier_pct = 100 * hier_reach[k] / reachable
             delta = hier_pct - flat_pct
             print(f"Precision@{k:<5} {flat_pct:7.1f}% {hier_pct:13.1f}% {delta:+7.1f}%")
+
+    # TAP-feasible filtered queries
+    filtered_rows = [r for r in results_rows if r.get("tap_feasible", 1)]
+    n_filt = len(filtered_rows)
+    if n_filt > 0:
+        # Count filtered reachable
+        filt_reachable = 0
+        flat_filt = {k: 0 for k in ks}
+        hier_filt = {k: 0 for k in ks}
+        flat_filt_reach = {k: 0 for k in ks}
+        hier_filt_reach = {k: 0 for k in ks}
+        for row in filtered_rows:
+            for k in ks:
+                flat_filt[k] += row[f"flat_hit@{k}"]
+                hier_filt[k] += row[f"hier_hit@{k}"]
+            gt = np.array([row["gt_robot_x"], row["gt_robot_y"], row["gt_robot_z"]])
+            min_d = min(np.linalg.norm(get_object_centroid(n) - gt)
+                        for n in object_nodes)
+            if min_d <= 5.0:
+                filt_reachable += 1
+                for k in ks:
+                    flat_filt_reach[k] += row[f"flat_hit@{k}"]
+                    hier_filt_reach[k] += row[f"hier_hit@{k}"]
+
+        print()
+        print(f"--- TAP-feasible queries only ({n_filt} queries, "
+              f"{n_excluded} excluded) ---")
+        print(f"{'Metric':<15} {'Flat':>8} {'Hierarchical':>14} {'Delta':>8}")
+        print("-" * 50)
+        for k in ks:
+            flat_pct = 100 * flat_filt[k] / n_filt
+            hier_pct = 100 * hier_filt[k] / n_filt
+            delta = hier_pct - flat_pct
+            print(f"Precision@{k:<5} {flat_pct:7.1f}% {hier_pct:13.1f}% {delta:+7.1f}%")
+
+        if filt_reachable > 0:
+            print()
+            print(f"--- TAP-feasible + reachable ({filt_reachable} queries) ---")
+            print(f"{'Metric':<15} {'Flat':>8} {'Hierarchical':>14} {'Delta':>8}")
+            print("-" * 50)
+            for k in ks:
+                flat_pct = 100 * flat_filt_reach[k] / filt_reachable
+                hier_pct = 100 * hier_filt_reach[k] / filt_reachable
+                delta = hier_pct - flat_pct
+                print(f"Precision@{k:<5} {flat_pct:7.1f}% {hier_pct:13.1f}% {delta:+7.1f}%")
+
+        # Print excluded queries for transparency
+        print()
+        print(f"Excluded queries ({n_excluded}):")
+        for row in results_rows:
+            if not row.get("tap_feasible", 1):
+                print(f"  - {row['question'][:80]}")
 
     print("=" * 60)
 
