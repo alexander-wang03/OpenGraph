@@ -4,27 +4,26 @@ Plot compression sweep results — delta vs precision & compression ratio.
 
 Usage:
     cd /home/awang/Documents/TRAILbot/OpenGraph
-    python script/plot_sweep.py [--csv PATH] [--out DIR]
-
-Defaults to results/warehouse_03/pcd/sweep_compression_results.csv
+    python script/plot_sweep.py --config-name=isaac_warehouse sequence=04
 """
 
-import argparse
+import hydra
+from omegaconf import DictConfig
 import pandas as pd
 import matplotlib.pyplot as plt
-import matplotlib.ticker as mticker
 import numpy as np
 from pathlib import Path
 
 
-def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--csv", default="../results/warehouse_03/pcd/sweep_compression_results.csv")
-    parser.add_argument("--out", default="../results/warehouse_03/pcd/")
-    args = parser.parse_args()
+@hydra.main(version_base=None, config_path="../config")
+def main(cfg):
+    seq = f"{cfg.sequence:02d}" if isinstance(cfg.sequence, int) else cfg.sequence
+    result_dir = Path(f"../results/warehouse_{seq}/pcd")
+    csv_path = result_dir / "sweep_compression_results.csv"
+    out = result_dir
 
-    df = pd.read_csv(args.csv)
-    out = Path(args.out)
+    print(f"Reading sweep results from: {csv_path}")
+    df = pd.read_csv(csv_path)
 
     # Separate baseline and compressed rows
     baseline = df[df["task_set"] == "none"].iloc[0]
@@ -33,7 +32,7 @@ def main():
 
     plt.style.use("seaborn-v0_8-whitegrid")
     fig, axes = plt.subplots(2, 2, figsize=(14, 10))
-    fig.suptitle("IB Compression Sweep — Seq 03", fontsize=14, fontweight="bold")
+    fig.suptitle(f"IB Compression Sweep — Seq {seq}", fontsize=14, fontweight="bold")
 
     # ---- Plot 1: Compression ratio vs delta ----
     ax = axes[0, 0]
@@ -85,7 +84,6 @@ def main():
 
     # ---- Plot 4: Flat P@1 (reachable) vs compression ratio ----
     ax = axes[1, 1]
-    # Combine both task sets + baseline for this plot
     ax.scatter(baseline["compression_ratio"], baseline["flat_P@1_reach"],
                marker="*", s=200, color="black", zorder=5, label="Baseline (flat)")
     ax.scatter(baseline["compression_ratio"], baseline["hier_P@1_reach"],

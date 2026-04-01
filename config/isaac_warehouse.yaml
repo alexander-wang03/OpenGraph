@@ -7,7 +7,7 @@
 
 # Dataset
 basedir: /home/awang/Documents/TRAILbot/OpenGraph/data/isaac_warehouse
-sequence: !!str 03
+sequence: !!str 05
 dataset_type: isaac                                # Use IsaacDataset (no Tr transform on poses)
 stride: 10                                         # Process every 10th frame
 start: 0
